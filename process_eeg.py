@@ -48,7 +48,7 @@ def raw_dsp(raw: mne.io.RawArray, channel:int=None):
     if channel:
         raw = select_channel(raw, picks=[channel-1])
     raw.load_data()
-    raw=raw.resample(128)
+    # raw=raw.resample(128)
     raw = raw.filter(1, 40)
     return raw
 
