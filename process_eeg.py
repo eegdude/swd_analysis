@@ -70,10 +70,11 @@ def detect_swd(raw):
 if __name__ == "__main__":
 
     root = Tk()
+    root.withdraw()
     filename = filedialog.askopenfilename(initialdir = ".",title = "Select file")
     print (filename)
 
-    channel = input('type channel number, press enter')    
+    channel = input('type channel number, press enter   ')
     f = FileReader(pathlib.Path(filename))
     ch = raw_dsp(f.raw, int(channel))
     plot(ch)
