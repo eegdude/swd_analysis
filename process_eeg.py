@@ -46,7 +46,7 @@ def save_file(swd_list:list):
 
 def raw_dsp(raw: mne.io.RawArray, channel:int=None):
     if channel:
-        raw = select_channel(raw, picks=[channel])
+        raw = select_channel(raw, picks=[channel-1])
     raw.load_data()
     raw=raw.resample(128)
     raw = raw.filter(1, 40)
@@ -68,16 +68,14 @@ def detect_swd(raw):
     plt.show()
 
 if __name__ == "__main__":
-    root = Tk()
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument('filepath', type=str, help='single-chahnnel *df file',)
-    parser.add_argument('-c', '--channel', type=int, default=None, help='channel of interest, default None')
 
-    args = parser.parse_args()
-    
-    f = FileReader(pathlib.Path(args.filepath))
-    ch = raw_dsp(f.raw, args.channel)
+    root = Tk()
+    filename = filedialog.askopenfilename(initialdir = ".",title = "Select file")
+    print (filename)
+
+    channel = input('type channel number, press enter')    
+    f = FileReader(pathlib.Path(filename))
+    ch = raw_dsp(f.raw, int(channel))
     plot(ch)
     swd_list = cut_annotations(ch)
     save_file(swd_list)
