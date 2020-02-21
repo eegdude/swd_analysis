@@ -49,7 +49,7 @@ def raw_dsp(raw: mne.io.RawArray, channel:int=None):
         raw = select_channel(raw, picks=[channel-1])
     raw.load_data()
     # raw=raw.resample(128)
-    raw = raw.filter(1, 40)
+    # raw = raw.filter(1, 40)
     return raw
 
 def detect_swd(raw):

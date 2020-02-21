@@ -31,21 +31,27 @@ class MainWindow(pg.GraphicsWindow):
         self.channel = 0
 
         self.setWindowTitle("EEG plot")
-        self.create_channel_switching_buttons()
         self.eeg_plots = {}
-        self.create_eeg_plot()
+        self.create_channel_switching_buttons()
 
     def create_eeg_plot(self, channel=0):
         ch_name = self.eeg.info['ch_names'][channel]
-        self.eeg_plots[ch_name] = pg.PlotWidget( background='#FFFFFF')
-        self.eeg_plots[ch_name].setAntialiasing(False)
+        p = pg.PlotWidget( background='default')
+        p.setAntialiasing(False)
         
-        eeg_plot = EegPlotter(eeg=self.eeg, channel=channel, vb=self.eeg_plots[ch_name].getViewBox())
-        self.eeg_plots[ch_name].addItem(eeg_plot)
-        self.eeg_layout.addWidget(self.eeg_plots[ch_name])
+        eeg_plot = EegPlotter(eeg=self.eeg, channel=channel, vb=p.getViewBox())
+        p.addItem(eeg_plot, name = ch_name, title=ch_name)
+        self.eeg_layout.addWidget(p)
+        self.eeg_plots[ch_name] = {'PlotWidget':p, 'Curve':eeg_plot}
+        self.relink_plots()
 
         return eeg_plot
-   
+    
+    def relink_plots(self):
+        if len(self.eeg_plots.values())>1:
+            kk = list(self.eeg_plots.keys())
+            [self.eeg_plots[k]['PlotWidget'].setXLink(self.eeg_plots[kk[0]]['PlotWidget'].getViewBox()) for k in kk[1:]]
+    
     def keyPressEvent(self, event):
         ev = event.key()
         if ev == Qt.Key_Left or ev == Qt.Key_A:
@@ -55,7 +61,8 @@ class MainWindow(pg.GraphicsWindow):
         else:
             direction = None
         logging.debug(['key: ', direction])
-        self.eeg_plot.update_plot(caller='keyboard', direction=direction)
+        
+        list(self.eeg_plots.values())[0]['Curve'].update_plot(caller='keyboard', direction=direction)
 
     def create_channel_switching_buttons(self):
         self.layout = QHBoxLayout()
@@ -66,9 +73,11 @@ class MainWindow(pg.GraphicsWindow):
         self.setLayout(self.layout)
 
         self.channel_selectors=[QCheckBox(a) for a in self.eeg.info['ch_names']]
-        self.channel_selectors[0].setChecked(True)
         [self.button_layout.addWidget(a) for a in self.channel_selectors]
         [a.toggled.connect(self.switch_channels) for a in self.channel_selectors]
+        
+        self.channel_selectors[0].setChecked(True)
+        self.channel_selectors[1].setChecked(True)
 
     def switch_channels(self):
         ch_name = self.sender().text()
@@ -76,12 +85,11 @@ class MainWindow(pg.GraphicsWindow):
             if ch_name not in self.eeg_plots.values():
                 self.create_eeg_plot(self.eeg.info['ch_names'].index(ch_name))
         else:
-            self.eeg_plots[ch_name].setParent(None)
+            self.eeg_plots[ch_name]['PlotWidget'].setParent(None)
             self.eeg_plots.pop(ch_name)
 
 class EegPlotter(pg.PlotCurveItem):
     def __init__(self, eeg, channel, vb, parent=None):
-        # pg.PlotCurveItem.__init__(self, parent=parent)
         super(EegPlotter,self).__init__(parent)
         self.vb=vb
         self.eeg = eeg
@@ -102,27 +110,28 @@ class EegPlotter(pg.PlotCurveItem):
 
         if caller == 'keyboard':
             if direction == 'left':
-                self.eeg_start -= max(self.eeg_start-1000, 0)
-                if self.eeg_start>0:
-                    self.eeg_stop -= 1000
+                self.eeg_stop -= min(1000, self.eeg_start)
+                self.eeg_start = max(self.eeg_start-1000, 0)
+
             elif direction == 'right':
+                self.eeg_start += min(1000, abs(self.eeg_stop-self.eeg._data.shape[1]))
                 self.eeg_stop = min(self.eeg_stop+1000, self.eeg._data.shape[1])
-                if self.eeg_stop < self.eeg._data.shape[1]:
-                    self.eeg_start += 1000
+                    
             elif direction == None:
                 return
         else: # mouse
-            if self.eeg._data.shape[1] >= x_range[1]:
-                self.eeg_start = max(x_range[0], 0)
-            if x_range[0] >= 0:
-                self.eeg_stop = min(self.eeg._data.shape[1], x_range[1])
+            logging.debug (['x_range', x_range])
+            # if self.eeg._data.shape[1] >= x_range[1]:
+            self.eeg_stop = min(self.eeg._data.shape[1], x_range[1])
+            # if x_range[0] >= 0:
+            self.eeg_start = max(x_range[0], 0)
 
         x = np.arange(self.eeg_start, self.eeg_stop)
         y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
         self.setData(x, y, pen=pg.mkPen(color=pg.intColor(0), width=2), antialias=True)
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
         
-        logging.debug ([0, self.eeg_start, self.eeg_stop, x_range, abs(x_range[1] - x_range[0])])
+        logging.debug ([0, self.eeg_start, self.eeg_stop, x_range, abs(x_range[1] - x_range[0]), self.eeg._data.shape[1]])
 
     def viewRangeChanged(self, *, caller:str=None):
         self.update_plot(caller='mouse')
@@ -135,7 +144,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     # eeg = open_file()
     eeg = eeg_processing.open_eeg_file(pathlib.Path(r"C:\Data\kenul\28-01-2020_13-51.bdf"))
-    # eeg = eeg_processing.filter_eeg(eeg)
+    eeg = eeg_processing.filter_eeg(eeg)
     eeg._data = eeg._data[:, :15000]
     ep = MainWindow(eeg)
     ep.show()
