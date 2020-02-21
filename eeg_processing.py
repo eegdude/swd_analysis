@@ -8,6 +8,6 @@ def open_eeg_file(filename: pathlib.Path=None):
         raw = mne.io.read_raw_edf(filename, preload=True)
     return raw
 
-def filter_eeg(eeg:mne.io.RawArray):
-    eeg = eeg.filter(1, 40)
+def filter_eeg(eeg: mne.io.RawArray):
+    eeg = eeg.filter(1, 40, verbose=0)
     return eeg
