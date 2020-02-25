@@ -157,7 +157,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     # eeg = open_file()
-    eeg = eeg_processing.open_eeg_file(pathlib.Path(r"C:\Data\kenul\28-01-2020_13-51.bdf"))
+    eeg = eeg_processing.open_eeg_file(pathlib.Path(open('.test_file_path', 'r').read()))
     eeg = eeg_processing.filter_eeg(eeg)
     # eeg._data = eeg._data[:, :15000]
     ep = MainWindow(eeg)
