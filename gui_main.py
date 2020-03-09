@@ -37,10 +37,9 @@ class MainWindow(pg.GraphicsWindow):
 
     def create_eeg_plot(self, channel:int=0):
         ch_name = self.eeg.info['ch_names'][channel]
-        p = pg.PlotWidget( background='#FFFFFF')
+        p = pg.PlotWidget( background='#000000', title=ch_name)
         p.setAntialiasing(True)
-        
-        eeg_plot = EegPlotter(eeg=self.eeg, channel=channel, vb=p.getViewBox())
+        eeg_plot = EegPlotter(eeg=self.eeg, channel=channel, parent=p)
         p.addItem(eeg_plot, name = ch_name, title=ch_name)
         self.eeg_layout.addWidget(p)
         self.eeg_plots[ch_name] = {'PlotWidget':p, 'Curve':eeg_plot}
@@ -54,7 +53,6 @@ class MainWindow(pg.GraphicsWindow):
             [self.eeg_plots[k]['PlotWidget'].setXLink(self.eeg_plots[kk[0]]['PlotWidget'].getViewBox()) for k in kk[1:]]
             [self.eeg_plots[k]['PlotWidget'].setYLink(self.eeg_plots[kk[0]]['PlotWidget'].getViewBox()) for k in kk[1:]]
 
-    
     def keyPressEvent(self, event):
         ev = event.key()
         if ev == Qt.Key_Left or ev == Qt.Key_A:
@@ -92,10 +90,11 @@ class MainWindow(pg.GraphicsWindow):
             self.eeg_plots.pop(ch_name)
 
 class EegPlotter(pg.PlotCurveItem):
-    def __init__(self, eeg, vb, channel:int=0, parent=None):
+    def __init__(self, eeg, channel:int=0, parent=None):
         super(EegPlotter,self).__init__()
-        self.vb = vb
+        self.vb = parent.getViewBox()
         self.vb.disableAutoRange()
+        self.range_lines = []
         self.eeg = eeg
         self.channel = channel
         self.last_pos = [None, None]
@@ -105,6 +104,26 @@ class EegPlotter(pg.PlotCurveItem):
         self.eeg_stop = self.window_len_sec*int(eeg.info['sfreq'])
         self.max_displayed_len = 1e4
         self.update_plot(eeg_start=self.eeg_start, eeg_stop=self.eeg_stop, init=True)
+
+    def mouseClickEvent(self, ev):
+        print ('pltclicked')
+        self.manage_region(ev)
+    
+    def manage_region(self, ev):
+        if ev.double():
+            if len(self.range_lines) < 2:
+                self.range_lines.append(pg.InfiniteLine(int(ev.pos().x())))
+                print(self.range_lines[0])
+                self.vb.addItem(self.range_lines[-1])
+            
+            if len(self.range_lines) == 2:
+                region = pg.LinearRegionItem(values = [self.range_lines[0].getXPos(),
+                                                    self.range_lines[1].getXPos()])
+                self.vb.addItem(region, ignoreBounds=True)
+                
+                self.vb.removeItem(self.range_lines[0])
+                self.vb.removeItem(self.range_lines[1])
+                self.range_lines = []
 
     def update_plot(self, eeg_start=None, eeg_stop=None, caller:str=None, direction=None, init:bool=None):
         if init:
@@ -141,10 +160,12 @@ class EegPlotter(pg.PlotCurveItem):
             x, y = x[::ds_div], scipy.signal.decimate(y, ds_div, ftype='fir')
         else:
             ds_div = 1
-
+        
         self.setData(x=x, y=y, pen=pg.mkPen(color=pg.intColor(0), width=1), antialias=True)
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
         self.last_pos = [self.eeg_start, self.eeg_stop]
+        # self.label.setPos(self.vb.viewRange()[0][0], self.vb.viewRange()[1][1])
+        # print 
         logging.debug (f"drawing len {len(y)} downsample {ds_div} start {self.eeg_start} stop {self.eeg_stop} range {x_range} range_samples {abs(x_range[1] - x_range[0])} eeg len {self.eeg._data.shape[1]} last {self.last_pos}")
 
     def viewRangeChanged(self, *, caller:str=None):
