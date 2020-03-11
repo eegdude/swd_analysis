@@ -9,5 +9,6 @@ def open_eeg_file(filename: pathlib.Path=None):
     return raw
 
 def filter_eeg(eeg: mne.io.RawArray):
-    eeg = eeg.filter(1, 40, verbose=0)
+    if eeg is not None:
+        eeg = eeg.filter(1, 40, verbose=0)
     return eeg
