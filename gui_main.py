@@ -13,6 +13,7 @@ import logging
 
 settings = QSettings('MSU', 'swd_analysis')
 pg.setConfigOptions(enableExperimental=False)
+settings.setValue('WINDOW_COLOR', '#FFFFFF')
 # settings.clear()
 
 def open_file():
@@ -27,7 +28,7 @@ def open_file():
 class MainWindow(pg.GraphicsWindow):
     def __init__(self, eeg=None):
         super(MainWindow, self).__init__()
-        self.setBackground('#FFFFFF')
+        self.setBackground(settings.value('WINDOW_COLOR'))
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
         self.eeg = eeg
@@ -60,7 +61,7 @@ class MainWindow(pg.GraphicsWindow):
 class MainWidget(pg.GraphicsLayoutWidget):
     def __init__(self, eeg, parent=None):
         super(MainWidget, self).__init__(parent)
-        self.setBackground('#FFFFFF')
+        self.setBackground(settings.value('WINDOW_COLOR'))
         self.eeg = eeg
         self.channel = 0
         self.eeg_plots = {}
