@@ -131,7 +131,8 @@ class MainWidget(pg.GraphicsLayoutWidget):
 class EegPlotter(pg.PlotCurveItem):
     def __init__(self, eeg, channel:int=0, parent=None):
         super(EegPlotter,self).__init__()
-        self.vb = parent.getViewBox()
+        self.parent = parent
+        self.vb = self.parent.getViewBox()
         self.vb.disableAutoRange()
         self.range_lines = []
         self.eeg = eeg
@@ -165,6 +166,7 @@ class EegPlotter(pg.PlotCurveItem):
                 self.range_lines = []
 
     def update_plot(self, eeg_start=None, eeg_stop=None, caller:str=None, direction=None, init:bool=None):
+
         if init:
             y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
             self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), yRange=(np.min(y), np.max(y)), padding=0, update=False)
@@ -204,6 +206,13 @@ class EegPlotter(pg.PlotCurveItem):
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
         self.last_pos = [self.eeg_start, self.eeg_stop]
         logging.debug (f"drawing len {len(y)} downsample {ds_div} start {self.eeg_start} stop {self.eeg_stop} range {x_range} range_samples {abs(x_range[1] - x_range[0])} eeg len {self.eeg._data.shape[1]} last {self.last_pos}")
+        
+        if len(x) > 0:
+            ax = self.parent.getPlotItem().getScale('bottom')
+            tv = ax.tickValues(x[0], x[-1], len(x))
+            tv = [[[v, '{:.1f}'.format(v*int(self.eeg.info['sfreq'])/1000)] for v in tick_level[1]] for tick_level in tv]
+            ax.setTicks(tv)
+
 
     def viewRangeChanged(self, *, caller:str=None):
         self.update_plot(caller='mouse')
@@ -221,6 +230,6 @@ if __name__ == "__main__":
             'filename':str(filename)}
     eeg['data'] = eeg_processing.filter_eeg(eeg['data'])
 
-    ep = MainWindow()
+    ep = MainWindow(eeg=eeg)
     ep.show()
     sys.exit(app.exec_())
