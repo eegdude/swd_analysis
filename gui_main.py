@@ -6,6 +6,8 @@ import scipy
 
 import pathlib
 import sys
+import pickle
+import uuid
 
 import eeg_processing
 
@@ -16,14 +18,39 @@ pg.setConfigOptions(enableExperimental=False)
 settings.setValue('WINDOW_COLOR', '#FFFFFF')
 # settings.clear()
 
-def open_file():
-    filename, _ = QFileDialog.getOpenFileName(None, 'Select EEG file', str(settings.value('LAST_FILE_LOCATION')), 'EEG (*.edf, *.bdf) ;; All files(*)')
+def open_file_dialog(ftype='raw'):
+    if ftype == 'raw':
+        window_name ='Select *DF file'
+        ftype_filter = 'EEG (*.edf, *.bdf) ;; All files(*)'
+    elif ftype == 'pickle':
+        window_name ='Select .pickle file'
+        ftype_filter = 'preprocessed EEG (*.pickle) ;; All files(*)'
+    
+    filename, _ = QFileDialog.getOpenFileName(None, window_name, str(settings.value('LAST_FILE_LOCATION')), ftype_filter)
     if filename:
         filename = pathlib.Path(filename)
         settings.setValue('LAST_FILE_LOCATION', filename.parent)
-        eeg = {'data':eeg_processing.open_eeg_file(filename),
-                'filename':str(filename)}
+        
+        if ftype == 'pickle':
+            with open(filename, 'rb') as f:
+                intermediate = pickle.load(f)
+                eeg = {'data':eeg_processing.open_eeg_file(pathlib.Path(intermediate['filename'])),
+                    'filename':str(filename)}
+                eeg['data'].annotation_dict = intermediate['annotation_dict']
+
+        elif ftype == 'raw':
+            eeg = {'data':eeg_processing.open_eeg_file(filename),
+                    'filename':str(filename)}
         return eeg
+
+class EEGRegionItem(pg.LinearRegionItem):
+    def __init__(self, parent, **kwargs):
+        super(EEGRegionItem, self).__init__(**kwargs)
+        self.parent = parent
+    
+    def mouseClickEvent(self, ev):
+        if ev.button() == Qt.RightButton:
+            self.parent.remove_annotation(self)
 
 class MainWindow(pg.GraphicsWindow):
     def __init__(self, eeg=None):
@@ -35,25 +62,75 @@ class MainWindow(pg.GraphicsWindow):
         self.create_menu()
         self.load_eeg(self.eeg)
 
-    def load_eeg(self, eeg):
+    def load_eeg(self, eeg, filter_data=False):
         if eeg is None:
             eeg = {'data':None, 'filename':''}
-        eeg['data'] = eeg_processing.filter_eeg(eeg['data'])
+        if filter_data:
+            eeg['data'] = eeg_processing.filter_eeg(eeg['data'])
         self.graph_widget = MainWidget(eeg = eeg['data'], parent = self)
         self.setWindowTitle(eeg['filename'])
         self.layout.addWidget(self.graph_widget)
+    
+    def save_processed_eeg(self):
+        payload = {'filename':self.eeg['filename'],
+                'annotation_dict':self.eeg['data'].annotation_dict}
+        with open (self.eeg['filename'] + '.pickle', 'wb') as f:
+            pickle.dump(payload, f)
 
     def create_menu(self):
-        OpenAction = QAction("&Open", self)
-        OpenAction.setShortcut("Ctrl+O")
-        OpenAction.triggered.connect(self.open_file)
         menubar = QMenuBar(self)
+
         actionFile = menubar.addMenu("File")
-        actionFile.addAction(OpenAction)
+
+        OpenRawAction = QAction("&Open raw file", self)
+        OpenRawAction.setShortcut("Ctrl+O")
+        OpenRawAction.triggered.connect(lambda x: self.open_file(ftype='raw'))
+        actionFile.addAction(OpenRawAction)
+
+        OpenAnnAction = QAction("Open &annotated file", self)
+        OpenAnnAction.triggered.connect(lambda x: self.open_file(ftype='pickle'))
+        actionFile.addAction(OpenAnnAction)
+
+        SaveAction = QAction("&Save intermediate file", self)
+        SaveAction.setShortcut("Ctrl+S")
+        SaveAction.triggered.connect(self.save_processed_eeg)
+        actionFile.addAction(SaveAction)
+
+        actionAnalysis = menubar.addMenu("Analysis")
+        
+        DetectSwdAction = QAction("&Filter", self)
+        DetectSwdAction.triggered.connect(self.filter_and_reload)
+        actionAnalysis.addAction(DetectSwdAction)
+
+        DetectSwdAction = QAction("&Detect SWD", self)
+        DetectSwdAction.triggered.connect(self.detect_swd)
+        actionAnalysis.addAction(DetectSwdAction)
+        
+        ExportSwdAction = QAction("&Export SWD", self)
+        ExportSwdAction.triggered.connect(self.export_SWD)
+        actionAnalysis.addAction(ExportSwdAction)
+        
         self.layout.addWidget(menubar)
     
-    def open_file(self):
-        self.eeg = open_file()
+    def filter_and_reload(self):
+        self.graph_widget.setParent(None)
+        self.graph_widget.destroy()
+        self.load_eeg(self.eeg, filter_data=True)
+
+    def detect_swd(self):
+        pass
+    
+    def export_SWD(self):
+        pass
+
+    def open_file(self, ftype='raw'):
+        eeg = open_file_dialog(ftype)
+
+        if not eeg:
+            return
+        else:
+            self.eeg = eeg
+
         self.graph_widget.setParent(None)
         self.graph_widget.destroy()
         self.load_eeg(self.eeg)
@@ -63,6 +140,10 @@ class MainWidget(pg.GraphicsLayoutWidget):
         super(MainWidget, self).__init__(parent)
         self.setBackground(settings.value('WINDOW_COLOR'))
         self.eeg = eeg
+
+        if not hasattr(self.eeg, 'annotation_dict'):
+            self.eeg.annotation_dict = {a:{} for a in self.eeg.info['ch_names']}
+
         self.channel = 0
         self.eeg_plots = {}
         self.create_window_elements()
@@ -87,7 +168,7 @@ class MainWidget(pg.GraphicsLayoutWidget):
         [self.menu_layout.addWidget(a) for a in self.channel_selectors]
         [a.toggled.connect(self.switch_channels) for a in self.channel_selectors]
         
-        self.channel_selectors[0].setChecked(True)
+        self.channel_selectors[0].setChecked(True) # Development
         self.channel_selectors[1].setChecked(True)
 
     def create_eeg_plot(self, channel:int=0):
@@ -98,10 +179,10 @@ class MainWidget(pg.GraphicsLayoutWidget):
         p.addItem(eeg_plot, name = ch_name, title=ch_name)
         self.eeg_layout.addWidget(p)
         self.eeg_plots[ch_name] = {'PlotWidget':p, 'Curve':eeg_plot}
-        self.relink_plots()
+        self.link_plots()
         return eeg_plot
     
-    def relink_plots(self):
+    def link_plots(self):
         if len(self.eeg_plots.values())>1:
             kk = list(self.eeg_plots.keys())
             [self.eeg_plots[k]['PlotWidget'].setXLink(self.eeg_plots[kk[0]]['PlotWidget'].getViewBox()) for k in kk[1:]]
@@ -135,8 +216,11 @@ class EegPlotter(pg.PlotCurveItem):
         self.vb = self.parent.getViewBox()
         self.vb.disableAutoRange()
         self.range_lines = []
+
         self.eeg = eeg
         self.channel = channel
+        self.ch_name = self.eeg.info['ch_names'][self.channel]
+
         self.last_pos = [None, None]
         self.window_len_sec = 10
         self.scroll_step = 1000 # make adapive?
@@ -153,24 +237,52 @@ class EegPlotter(pg.PlotCurveItem):
         if ev.double():
             if len(self.range_lines) < 2:
                 self.range_lines.append(pg.InfiniteLine(int(ev.pos().x())))
-                print(self.range_lines[0])
                 self.vb.addItem(self.range_lines[-1])
             
             if len(self.range_lines) == 2:
-                region = pg.LinearRegionItem(values = [self.range_lines[0].getXPos(),
-                                                    self.range_lines[1].getXPos()])
-                self.vb.addItem(region, ignoreBounds=True)
-                
-                self.vb.removeItem(self.range_lines[0])
-                self.vb.removeItem(self.range_lines[1])
-                self.range_lines = []
+                self.create_region()
+                #update annotations 
+   
+    def add_region(self, values, uuid):
+        region = EEGRegionItem(values=values, parent=self)
+        region.sigRegionChangeFinished.connect(lambda: self.update_annotation(region))
+        region.uuid = uuid
+        self.vb.addItem(region, ignoreBounds=True)
+        return region
+
+    def draw_region(self):
+        region = self.add_region(values = [self.range_lines[0].getXPos(),
+            self.range_lines[1].getXPos()],
+            uuid = str(uuid.uuid4()))
+
+        self.vb.removeItem(self.range_lines[0])
+        self.vb.removeItem(self.range_lines[1])
+        self.range_lines = []
+        return region
+
+    def create_region(self):
+        region = self.draw_region()
+        self.update_annotation(region)
+
+    def update_annotation(self, region):
+        self.eeg.annotation_dict[self.ch_name][region.uuid] = dict(onset = region.getRegion()[0],
+                duration = (region.getRegion()[1] - region.getRegion()[0]),
+                orig_time = self.eeg.annotations.orig_time)
+        print (self.eeg.annotation_dict)
+    
+    def remove_annotation(self,item):
+        self.eeg.annotation_dict[self.ch_name].pop(item.uuid, None)
+        self.vb.removeItem(item)
+        print (self.eeg.annotation_dict)
 
     def update_plot(self, eeg_start=None, eeg_stop=None, caller:str=None, direction=None, init:bool=None):
 
         if init:
             y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
             self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), yRange=(np.min(y), np.max(y)), padding=0, update=False)
-            return
+            for annotation in self.eeg.annotation_dict[self.ch_name].items():
+                self.add_region(values=[annotation[1]['onset'], annotation[1]['onset'] + annotation[1]['duration']], uuid=annotation[0])
+
 
         x_range = [int(a) for a in self.vb.viewRange()[0]]
         if caller == 'keyboard':
@@ -206,20 +318,24 @@ class EegPlotter(pg.PlotCurveItem):
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
         self.last_pos = [self.eeg_start, self.eeg_stop]
         logging.debug (f"drawing len {len(y)} downsample {ds_div} start {self.eeg_start} stop {self.eeg_stop} range {x_range} range_samples {abs(x_range[1] - x_range[0])} eeg len {self.eeg._data.shape[1]} last {self.last_pos}")
-        
+
         if len(x) > 0:
             ax = self.parent.getPlotItem().getScale('bottom')
             tv = ax.tickValues(x[0], x[-1], len(x))
             tv = [[[v, '{:.1f}'.format(v*int(self.eeg.info['sfreq'])/1000)] for v in tick_level[1]] for tick_level in tv]
             ax.setTicks(tv)
-
+        
+        if self.eeg_stop:
+            percentage = self.eeg_stop/self.eeg['data'][1].shape[0]*100
+            if (self.parent.parent()):
+                self.parent.parent().parent().setWindowTitle("{} {:.1f}%".format(eeg['filename'], percentage))
 
     def viewRangeChanged(self, *, caller:str=None):
         self.update_plot(caller='mouse')
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
 
 if __name__ == "__main__":
-    logging.basicConfig(format='%(levelname)s	%(processName)s	%(message)s', level=logging.DEBUG)
+    logging.basicConfig(format='%(levelname)s	%(processName)s	%(message)s', level=logging.ERROR)
     logging.getLogger()
 
     app = QApplication(sys.argv)
