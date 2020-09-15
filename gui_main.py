@@ -2,7 +2,7 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 import pyqtgraph as pg
 import numpy as np
-import scipy
+from scipy import signal
 
 import pathlib
 import sys
@@ -218,6 +218,7 @@ class EegPlotter(pg.PlotCurveItem):
         self.range_lines = []
 
         self.eeg = eeg
+        self.nsamp = self.eeg['data'][1].shape[0]
         self.channel = channel
         self.ch_name = self.eeg.info['ch_names'][self.channel]
 
@@ -230,7 +231,6 @@ class EegPlotter(pg.PlotCurveItem):
         self.update_plot(eeg_start=self.eeg_start, eeg_stop=self.eeg_stop, init=True)
 
     def mouseClickEvent(self, ev):
-        print ('pltclicked')
         self.manage_region(ev)
     
     def manage_region(self, ev):
@@ -268,21 +268,18 @@ class EegPlotter(pg.PlotCurveItem):
         self.eeg.annotation_dict[self.ch_name][region.uuid] = dict(onset = region.getRegion()[0],
                 duration = (region.getRegion()[1] - region.getRegion()[0]),
                 orig_time = self.eeg.annotations.orig_time)
-        print (self.eeg.annotation_dict)
     
     def remove_annotation(self,item):
         self.eeg.annotation_dict[self.ch_name].pop(item.uuid, None)
         self.vb.removeItem(item)
-        print (self.eeg.annotation_dict)
 
     def update_plot(self, eeg_start=None, eeg_stop=None, caller:str=None, direction=None, init:bool=None):
-
+        print ('called update')
         if init:
             y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
             self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), yRange=(np.min(y), np.max(y)), padding=0, update=False)
             for annotation in self.eeg.annotation_dict[self.ch_name].items():
                 self.add_region(values=[annotation[1]['onset'], annotation[1]['onset'] + annotation[1]['duration']], uuid=annotation[0])
-
 
         x_range = [int(a) for a in self.vb.viewRange()[0]]
         if caller == 'keyboard':
@@ -291,14 +288,14 @@ class EegPlotter(pg.PlotCurveItem):
                 self.eeg_stop -= min(self.scroll_step, self.eeg_start)
                 self.eeg_start = max(self.eeg_start-self.scroll_step, 0)
             elif direction == 'right':
-                self.eeg_start += min(self.scroll_step, abs(self.eeg_stop-self.eeg._data.shape[1]))
-                self.eeg_stop = min(self.eeg_stop+self.scroll_step, self.eeg._data.shape[1])
+                self.eeg_start += min(self.scroll_step, abs(self.eeg_stop-self.nsamp))
+                self.eeg_stop = min(self.eeg_stop+self.scroll_step, self.nsamp)
             elif direction == None:
                 return
         else: # mouse
             logging.debug (['x_range', x_range])
-            # if self.eeg._data.shape[1] >= x_range[1]:
-            self.eeg_stop = min(self.eeg._data.shape[1], x_range[1])
+
+            self.eeg_stop = min(self.nsamp, x_range[1])
             # if x_range[0] >= 0:
             self.eeg_start = max(x_range[0], 0)
         
@@ -309,15 +306,27 @@ class EegPlotter(pg.PlotCurveItem):
         y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
         
         if len(x) > self.max_displayed_len:
-            ds_div = int(2*len(x)//self.max_displayed_len)
-            x, y = x[::ds_div], scipy.signal.decimate(y, ds_div, ftype='fir')
+            ds_div = int(4*len(x)//self.max_displayed_len)
+            '''
+                Downsampling from PyQtGraph 'peak' method. To do it here is somehow
+                faster then in setData. This produces most acurate graphs when zoomed out.
+            '''
+            n = len(x) // ds_div
+            x1 = np.empty((n,2))
+            x1[:] = x[:n*ds_div:ds_div,np.newaxis]
+            x = x1.reshape(n*2)
+            y1 = np.empty((n,2))
+            y2 = y[:n*ds_div].reshape((n, ds_div))
+            y1[:,0] = y2.max(axis=1)
+            y1[:,1] = y2.min(axis=1)
+            y = y1.reshape(n*2)
         else:
             ds_div = 1
         
-        self.setData(x=x, y=y, pen=pg.mkPen(color=pg.intColor(0), width=1), antialias=True)
+        self.setData(x=x, y=y, pen=pg.mkPen(color=pg.intColor(0), width=1), antialias=False)#, downsample=True, downsampleMethod='peak')
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
         self.last_pos = [self.eeg_start, self.eeg_stop]
-        logging.debug (f"drawing len {len(y)} downsample {ds_div} start {self.eeg_start} stop {self.eeg_stop} range {x_range} range_samples {abs(x_range[1] - x_range[0])} eeg len {self.eeg._data.shape[1]} last {self.last_pos}")
+        logging.debug (f"drawing len {len(y)} downsample {ds_div} start {self.eeg_start} stop {self.eeg_stop} range {x_range} range_samples {abs(x_range[1] - x_range[0])} eeg len {self.nsamp} last {self.last_pos}")
 
         if len(x) > 0:
             ax = self.parent.getPlotItem().getScale('bottom')
@@ -326,12 +335,12 @@ class EegPlotter(pg.PlotCurveItem):
             ax.setTicks(tv)
         
         if self.eeg_stop:
-            percentage = self.eeg_stop/self.eeg['data'][1].shape[0]*100
             if (self.parent.parent()):
+                percentage = self.eeg_stop/self.nsamp*100
                 self.parent.parent().parent().setWindowTitle("{} {:.1f}%".format(eeg['filename'], percentage))
 
     def viewRangeChanged(self, *, caller:str=None):
-        self.update_plot(caller='mouse')
+        self.update_plot(caller=caller)
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
 
 if __name__ == "__main__":
