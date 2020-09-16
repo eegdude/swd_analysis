@@ -6,6 +6,7 @@ from scipy import signal
 
 import pathlib
 import sys
+import csv
 import pickle
 import uuid
 
@@ -30,18 +31,20 @@ def open_file_dialog(ftype='raw'):
     if filename:
         filename = pathlib.Path(filename)
         settings.setValue('LAST_FILE_LOCATION', filename.parent)
-        
-        if ftype == 'pickle':
-            with open(filename, 'rb') as f:
-                intermediate = pickle.load(f)
-                eeg = {'data':eeg_processing.open_eeg_file(pathlib.Path(intermediate['filename'])),
-                    'filename':str(filename)}
-                eeg['data'].annotation_dict = intermediate['annotation_dict']
+    return filename
 
-        elif ftype == 'raw':
-            eeg = {'data':eeg_processing.open_eeg_file(filename),
-                    'filename':str(filename)}
-        return eeg
+def open_eeg_file(filename):
+    if filename.suffix == '.pickle':
+        with open(filename, 'rb') as f:
+            intermediate = pickle.load(f)
+            eeg = {'data':eeg_processing.open_eeg_file(pathlib.Path(intermediate['filename'])),
+                'filename':str(filename)}
+            eeg['data'].annotation_dict = intermediate['annotation_dict']
+
+    elif filename.suffix == '.bdf' or filename.suffix == '.edf':
+        eeg = {'data':eeg_processing.open_eeg_file(filename),
+                'filename':str(filename)}
+    return eeg
 
 class EEGRegionItem(pg.LinearRegionItem):
     def __init__(self, parent, **kwargs):
@@ -52,25 +55,60 @@ class EEGRegionItem(pg.LinearRegionItem):
         if ev.button() == Qt.RightButton:
             self.parent.remove_annotation(self)
 
+class ExportSwdDialog(QDialog):
+    def __init__(self, parent):
+        super(ExportSwdDialog, self).__init__()
+        self.setWindowTitle("Select channels to export")
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+        
+        labels = {a:f"{a} ({len(parent.eeg['data'].annotation_dict[a])} SWDs)" for a in parent.eeg['data'].info['ch_names']}
+        self.channel_selectors={a:QCheckBox(labels[a]) for a in labels}
+        [self.layout.addWidget(self.channel_selectors[a]) for a in self.channel_selectors]
+
+        self.buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+
+        self.buttonBox.accepted.connect(self.export)
+        self.buttonBox.rejected.connect(self.cancel)
+        
+        self.layout.addWidget(self.buttonBox)
+        
+        self.ch_list = []
+
+    def export(self):
+        self.ch_list = ([a for a in self.channel_selectors if self.channel_selectors[a].isChecked()])
+        self.accept()
+
+    def cancel(self):
+        self.ch_list = None
+        self.reject()
+ 
+
 class MainWindow(pg.GraphicsWindow):
     def __init__(self, eeg=None):
         super(MainWindow, self).__init__()
+        self.eeg = eeg
         self.setBackground(settings.value('WINDOW_COLOR'))
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
-        self.eeg = eeg
         self.create_menu()
         self.load_eeg(self.eeg)
 
-    def load_eeg(self, eeg, filter_data=False):
-        if eeg is None:
-            eeg = {'data':None, 'filename':''}
+    def load_eeg(self, eeg:dict, filter_data:bool=False):
+        if not eeg:
+            return
+        self.eeg = eeg
+        if hasattr(self, 'eeg_plots'):
+            self.eeg_plots.setParent(None)
+            self.eeg_plots.destroy()
+        
         if filter_data:
             eeg['data'] = eeg_processing.filter_eeg(eeg['data'])
-        self.graph_widget = MainWidget(eeg = eeg['data'], parent = self)
-        self.setWindowTitle(eeg['filename'])
-        self.layout.addWidget(self.graph_widget)
     
+        self.eeg_plots = MainWidget(eeg = eeg['data'], parent = self)
+        self.setWindowTitle(eeg['filename'])
+        self.layout.addWidget(self.eeg_plots)
+
     def save_processed_eeg(self):
         payload = {'filename':self.eeg['filename'],
                 'annotation_dict':self.eeg['data'].annotation_dict}
@@ -113,26 +151,40 @@ class MainWindow(pg.GraphicsWindow):
         self.layout.addWidget(menubar)
     
     def filter_and_reload(self):
-        self.graph_widget.setParent(None)
-        self.graph_widget.destroy()
+        if not self.eeg:
+            QMessageBox.about(self, "Filter", "First load some EEG!")
+
+            return
+        self.eeg_plots.setParent(None)
+        self.eeg_plots.destroy()
         self.load_eeg(self.eeg, filter_data=True)
 
     def detect_swd(self):
         pass
     
     def export_SWD(self):
-        pass
-
+        if not self.eeg:
+            QMessageBox.about(self, "Export SWD", "First load some EEG with annotated SWD!")
+            return
+        self.channel_selector = ExportSwdDialog(self)
+        self.channel_selector.setModal(True)
+        self.channel_selector.exec_()
+        from matplotlib import pyplot as plt
+        if self.channel_selector.ch_list:
+            for ch_name in self.channel_selector.ch_list:
+                with open(self.eeg['filename'] + ch_name + '.csv', 'w') as f:
+                    for annotation in self.eeg_plots.eeg.annotation_dict[ch_name].values():
+                        channel = self.eeg_plots.eeg.info['ch_names'].index(ch_name)
+                        fragment = self.eeg_plots.eeg[channel][0][0][int(annotation['onset']):int(annotation['onset']+ annotation['duration'])]
+                        f.write(';'.join([str(a).replace('.',',') for a in fragment]) + '\n') # Excel dialect is not locale-aware :-(
+        
     def open_file(self, ftype='raw'):
-        eeg = open_file_dialog(ftype)
+        filename = open_file_dialog(ftype)
 
-        if not eeg:
+        if not filename:
             return
         else:
-            self.eeg = eeg
-
-        self.graph_widget.setParent(None)
-        self.graph_widget.destroy()
+            self.eeg = open_eeg_file(filename)
         self.load_eeg(self.eeg)
 
 class MainWidget(pg.GraphicsLayoutWidget):
@@ -274,7 +326,6 @@ class EegPlotter(pg.PlotCurveItem):
         self.vb.removeItem(item)
 
     def update_plot(self, eeg_start=None, eeg_stop=None, caller:str=None, direction=None, init:bool=None):
-        print ('called update')
         if init:
             y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
             self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), yRange=(np.min(y), np.max(y)), padding=0, update=False)
@@ -336,8 +387,9 @@ class EegPlotter(pg.PlotCurveItem):
         
         if self.eeg_stop:
             if (self.parent.parent()):
+                mw = self.parent.parent().parent()
                 percentage = self.eeg_stop/self.nsamp*100
-                self.parent.parent().parent().setWindowTitle("{} {:.1f}%".format(eeg['filename'], percentage))
+                mw.setWindowTitle("{} {:.1f}%".format(mw.eeg['filename'], percentage))
 
     def viewRangeChanged(self, *, caller:str=None):
         self.update_plot(caller=caller)
@@ -351,10 +403,9 @@ if __name__ == "__main__":
     eeg = None
 
     filename = pathlib.Path(open('.test_file_path', 'r').read())
-    eeg = {'data':eeg_processing.open_eeg_file(filename),
-            'filename':str(filename)}
-    eeg['data'] = eeg_processing.filter_eeg(eeg['data'])
+    eeg = open_eeg_file(filename)
 
     ep = MainWindow(eeg=eeg)
+    
     ep.show()
     sys.exit(app.exec_())
