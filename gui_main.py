@@ -169,15 +169,15 @@ class MainWindow(pg.GraphicsWindow):
         self.channel_selector = ExportSwdDialog(self)
         self.channel_selector.setModal(True)
         self.channel_selector.exec_()
-        from matplotlib import pyplot as plt
         if self.channel_selector.ch_list:
             for ch_name in self.channel_selector.ch_list:
                 with open(self.eeg['filename'] + ch_name + '.csv', 'w') as f:
+                    f.write(f"{self.eeg['data'].info['sfreq']}"+ '\n')
                     for annotation in self.eeg_plots.eeg.annotation_dict[ch_name].values():
                         channel = self.eeg_plots.eeg.info['ch_names'].index(ch_name)
                         fragment = self.eeg_plots.eeg[channel][0][0][int(annotation['onset']):int(annotation['onset']+ annotation['duration'])]
                         f.write(';'.join([str(a).replace('.',',') for a in fragment]) + '\n') # Excel dialect is not locale-aware :-(
-        
+            print ('done exports')
     def open_file(self, ftype='raw'):
         filename = open_file_dialog(ftype)
 
