@@ -1,6 +1,12 @@
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 import pyqtgraph as pg
+
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.figure import Figure
+
 import numpy as np
 from scipy import signal
 
@@ -9,6 +15,7 @@ import sys
 import csv
 import pickle
 import uuid
+import yaml
 
 import eeg_processing
 
@@ -19,19 +26,31 @@ pg.setConfigOptions(enableExperimental=False)
 settings.setValue('WINDOW_COLOR', '#FFFFFF')
 # settings.clear()
 
-def open_file_dialog(ftype='raw'):
+def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
     if ftype == 'raw':
         window_name ='Select *DF file'
         ftype_filter = 'EEG (*.edf, *.bdf) ;; All files(*)'
     elif ftype == 'pickle':
         window_name ='Select .pickle file'
         ftype_filter = 'preprocessed EEG (*.pickle) ;; All files(*)'
+    elif ftype == 'csv':
+        window_name ='Select .csv file'
+        ftype_filter = 'exported SWD (*.csv) ;; All files(*)'
     
-    filename, _ = QFileDialog.getOpenFileName(None, window_name, str(settings.value('LAST_FILE_LOCATION')), ftype_filter)
-    if filename:
-        filename = pathlib.Path(filename)
-        settings.setValue('LAST_FILE_LOCATION', filename.parent)
-    return filename
+    if multiple_files:
+        filenames, _ = QFileDialog.getOpenFileNames(None, window_name, str(settings.value('LAST_FILE_LOCATION')), ftype_filter)
+    else:
+        filename, _ = QFileDialog.getOpenFileName(None, window_name, str(settings.value('LAST_FILE_LOCATION')), ftype_filter)
+        filenames = [filename]
+    
+    if filenames:
+        filenames = [pathlib.Path(f) for f in filenames]
+        settings.setValue('LAST_FILE_LOCATION', filenames[0].parent)
+    
+    if multiple_files:
+        return filenames
+    else:
+        return filenames[0]
 
 def open_eeg_file(filename):
     if filename.suffix == '.pickle':
@@ -54,6 +73,18 @@ class EEGRegionItem(pg.LinearRegionItem):
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.RightButton:
             self.parent.remove_annotation(self)
+
+class MyScrollArea(QScrollArea):
+    def __init__(self, *args, **kwargs):
+        super(MyScrollArea, self).__init__(*args, **kwargs)
+        self.scrollable = True
+    
+    def wheelEvent (self, *args, **kwargs):
+        if self.scrollable:
+            QScrollArea.wheelEvent(self, *args, **kwargs)
+    
+    def SetScrollable(self, scrollable:bool):
+        self.scrollable = scrollable
 
 class ExportSwdDialog(QDialog):
     def __init__(self, parent):
@@ -82,7 +113,115 @@ class ExportSwdDialog(QDialog):
     def cancel(self):
         self.ch_list = None
         self.reject()
- 
+
+class MplCanvas(FigureCanvasQTAgg):
+    def __init__(self, parent=None, width=5, height=4, dpi=400):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = fig.add_subplot(111)
+        super(MplCanvas, self).__init__(fig)
+
+class SWDWindow(QWidget):
+    def __init__(self, parent):
+        super(SWDWindow, self).__init__()
+        self.setWindowTitle("Spectral analysis")
+        self.setWindowModality(Qt.ApplicationModal)
+
+        filenames = open_file_dialog(ftype='csv', multiple_files=True)
+        
+        self.layout = QHBoxLayout(self)
+        self.splitter = QSplitter(Qt.Horizontal)
+        
+        self.tabs = QTabWidget()
+        self.tabs_list = []
+
+        self.splitter.addWidget(self.tabs)
+        self.layout.addWidget(self.splitter)
+
+        self.swd_data = {}
+        self.swd_state = {}
+        self.swd_plots = {}
+        
+        for fn in filenames:
+            self.swd_plots[fn.name] = []
+            self.swd_data[fn.name] = self.load_swd_from_csv(fn)
+            self.swd_state[fn.name] = [True for a in range(len(self.swd_data[fn.name]))]
+        self.add_plot()
+    
+    def load_swd_from_csv(self, fn):
+        with open(fn, 'r') as f:
+            reader = csv.reader(f, delimiter=';')
+            rows = [r for r in reader]
+            sfreq = int(float(rows[0][0]))
+            swd_array = []
+            for row in rows[1:]:
+                swd = [float(a.replace(',', '.')) for a in row]
+                swd_array.append(swd)
+        self.add_swd_tab(swd_array, sfreq, fn)
+        return swd_array
+
+    def add_swd_tab(self, swd_array, sfreq, fn):
+        tab = MyScrollArea()
+        content_widget = QWidget()
+
+        self.tabs_list.append(tab)
+        self.tabs.addTab(tab, f"{fn.name}")
+
+        layout = QGridLayout(content_widget)
+
+        self.channel_selectors=[QCheckBox(str(a)) for a in range(len(swd_array))]
+        [layout.addWidget(a) for a in self.channel_selectors]
+        [sc.setChecked(True) for sc in self.channel_selectors]
+        [a.toggled.connect(lambda x: self.toggle_single_swd(fn.name)) for a in self.channel_selectors]
+
+        tab.setWidgetResizable(True)
+        
+        for n, swd in enumerate(swd_array):
+            pdi = pg.GraphicsLayoutWidget()
+            layout.addWidget(pdi, n, 1)
+            p = pdi.addPlot()
+            p.plot(swd, pen=pg.mkPen(color='r'))
+            self.swd_plots[fn.name].append(p)
+
+        tab.setWidget(content_widget)
+    
+    def add_plot(self):
+        plot_widget = QWidget()
+        plot_layout = QVBoxLayout()
+        plot_widget.setLayout(plot_layout)
+        self.splitter.addWidget(plot_widget)
+
+        self.sc = MplCanvas(self, width=5, height=4, dpi=400)
+        toolbar = NavigationToolbar2QT(self.sc, self)
+
+        plot_layout.addWidget(toolbar)
+        plot_layout.addWidget(self.sc)
+    
+    def analyse(self):
+        pass
+    
+    def redraw_plot(self, fn, swd_id, active):
+        if active:
+            pen = pg.mkPen(color='r')
+        else:
+            pen = pg.mkPen(color='w')
+        self.swd_plots[fn][swd_id].clear()
+        self.swd_plots[fn][swd_id].plot(self.swd_data[fn][swd_id], pen=pen)
+
+    def toggle_single_swd(self, fn:str):
+        swd_id = int(self.sender().text())
+        self.swd_state[fn][swd_id] = not self.swd_state[fn][swd_id]
+        self.redraw_plot(fn, swd_id, self.swd_state[fn][swd_id])
+        self.analyse()
+    
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Control and not event.isAutoRepeat():
+            [a.SetScrollable(False) for a in self.tabs_list]
+    
+    def keyReleaseEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Control and not event.isAutoRepeat():
+            [a.SetScrollable(True) for a in self.tabs_list]
 
 class MainWindow(pg.GraphicsWindow):
     def __init__(self, eeg=None):
@@ -143,17 +282,21 @@ class MainWindow(pg.GraphicsWindow):
         DetectSwdAction = QAction("&Detect SWD", self)
         DetectSwdAction.triggered.connect(self.detect_swd)
         actionAnalysis.addAction(DetectSwdAction)
+        DetectSwdAction.setDisabled(True)
         
         ExportSwdAction = QAction("&Export SWD", self)
         ExportSwdAction.triggered.connect(self.export_SWD)
         actionAnalysis.addAction(ExportSwdAction)
+        
+        AnalyseSpectrumAction = QAction("&Spectums", self)
+        AnalyseSpectrumAction.triggered.connect(self.anayse_spectrum)
+        actionAnalysis.addAction(AnalyseSpectrumAction)
         
         self.layout.addWidget(menubar)
     
     def filter_and_reload(self):
         if not self.eeg:
             QMessageBox.about(self, "Filter", "First load some EEG!")
-
             return
         self.eeg_plots.setParent(None)
         self.eeg_plots.destroy()
@@ -161,6 +304,10 @@ class MainWindow(pg.GraphicsWindow):
 
     def detect_swd(self):
         pass
+    
+    def anayse_spectrum(self):
+        self.spectral_analysis = SWDWindow(self)
+        self.spectral_analysis.show()
     
     def export_SWD(self):
         if not self.eeg:
@@ -178,9 +325,9 @@ class MainWindow(pg.GraphicsWindow):
                         fragment = self.eeg_plots.eeg[channel][0][0][int(annotation['onset']):int(annotation['onset']+ annotation['duration'])]
                         f.write(';'.join([str(a).replace('.',',') for a in fragment]) + '\n') # Excel dialect is not locale-aware :-(
             print ('done exports')
+    
     def open_file(self, ftype='raw'):
         filename = open_file_dialog(ftype)
-
         if not filename:
             return
         else:
@@ -225,7 +372,7 @@ class MainWidget(pg.GraphicsLayoutWidget):
 
     def create_eeg_plot(self, channel:int=0):
         ch_name = self.eeg.info['ch_names'][channel]
-        p = pg.PlotWidget( background='#000000', title=ch_name)
+        p = pg.PlotWidget(background='#000000', title=ch_name)
         p.setAntialiasing(True)
         eeg_plot = EegPlotter(eeg=self.eeg, channel=channel, parent=p)
         p.addItem(eeg_plot, name = ch_name, title=ch_name)
@@ -293,7 +440,6 @@ class EegPlotter(pg.PlotCurveItem):
             
             if len(self.range_lines) == 2:
                 self.create_region()
-                #update annotations 
    
     def add_region(self, values, uuid):
         region = EEGRegionItem(values=values, parent=self)
@@ -402,10 +548,10 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     eeg = None
 
-    filename = pathlib.Path(open('.test_file_path', 'r').read())
-    eeg = open_eeg_file(filename)
+    # filename = pathlib.Path(open('.test_file_path', 'r').read())
+    # eeg = open_eeg_file(filename)
 
     ep = MainWindow(eeg=eeg)
-    
+
     ep.show()
     sys.exit(app.exec_())
