@@ -47,7 +47,8 @@ def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
     if filenames:
         filenames = [pathlib.Path(f) for f in filenames]
         settings.setValue('LAST_FILE_LOCATION', filenames[0].parent)
-
+    if pathlib.WindowsPath('.') in filenames:
+        return []
     if multiple_files:
         return filenames
     else:
