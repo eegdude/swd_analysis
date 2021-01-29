@@ -665,7 +665,22 @@ class EegPlotter(pg.PlotCurveItem):
         if len(x) > 0:
             ax = self.parent.getPlotItem().getScale('bottom')
             tv = ax.tickValues(x[0], x[-1], len(x))
-            tv = [[[v, '{:.1f}'.format(v*int(self.eeg.info['sfreq'])/1000)] for v in tick_level[1]] for tick_level in tv]
+
+            a = sum([a[1] for a in tv], []) # smallest level ticks
+            a.sort()
+            if len(a) > 0:
+                delta_ticks_sec = (a[1] - a[0])/int(self.eeg.info['sfreq'])
+                print(a[1], a[0], delta_ticks_sec)
+                if delta_ticks_sec > 60:
+                    tick_formatter = (60, 'min')
+                elif delta_ticks_sec > 3600:
+                    tick_formatter = (3600, 'hour')
+                elif delta_ticks_sec < 1:
+                    tick_formatter = (0.001,'ms')
+                else:
+                    tick_formatter = (1,'')
+
+            tv = [[[v, '{:.0f} {}'.format(v/int(self.eeg.info['sfreq'])/tick_formatter[0], tick_formatter[1])] for v in tick_level[1]] for tick_level in tv]
             ax.setTicks(tv)
         
         if self.eeg_stop:
@@ -685,8 +700,8 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     eeg = None
 
-    # filename = pathlib.Path(open('.test_file_path', 'r').read())
-    # eeg = open_eeg_file(filename)
+    filename = pathlib.Path(open('.test_file_path', 'r').read())
+    eeg = open_eeg_file(filename)
 
     ep = MainWindow(eeg=eeg)
 
