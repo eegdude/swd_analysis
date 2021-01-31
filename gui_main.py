@@ -47,26 +47,52 @@ def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
     if filenames:
         filenames = [pathlib.Path(f) for f in filenames]
         settings.setValue('LAST_FILE_LOCATION', filenames[0].parent)
-    if pathlib.WindowsPath('.') in filenames:
+    if pathlib.WindowsPath('.') in filenames:                                   # фигня с точкой происходит из-за пустого пути
         return []
     if multiple_files:
         return filenames
     else:
         return filenames[0]
 
-def open_eeg_file(filename):
+def check_filename(filename):
+    if filename:
+        if filename.exists():
+            return True
+        else:
+            return
+    else:
+        return
+
+def open_data_file(filename):
+    if not check_filename(filename):
+        return None
+
     if filename.suffix == '.pickle':
         with open(filename, 'rb') as f:
             intermediate = pickle.load(f)
-            eeg = {'data':eeg_processing.open_eeg_file(pathlib.Path(intermediate['filename'])),
+            eeg_file_path = pathlib.Path(intermediate['filename'])
+            if not check_filename(eeg_file_path):
+                buttonReply = QMessageBox.question(None, "No valid EEG for this annotation", f"No file at {eeg_file_path}\nSelect another xdf file?")
+                if buttonReply == QMessageBox.Yes:
+                    data = open_data_file(open_file_dialog('raw'))
+                    if data:
+                        data = data['data']
+                    else:
+                        return None
+                else:
+                    return None
+            else:
+                data = eeg_processing.read_xdf_file(eeg_file_path)
+
+            eeg = {'data':data,
                 'filename':str(filename)}
             eeg['data'].annotation_dict = intermediate['annotation_dict']
 
     elif filename.suffix == '.bdf' or filename.suffix == '.edf':
-        eeg = {'data':eeg_processing.open_eeg_file(filename),
+        eeg = {'data':eeg_processing.read_xdf_file(filename),
                 'filename':str(filename)}
     else:
-        QMessageBox.about(None, "No valid EEG", "You can load .pickle or .xdf file")
+        QMessageBox.about(None, "No valid EEG", f"No vaild EEG file at {filename}\nYou can load .pickle or .xdf file")
         return None
     return eeg
 
@@ -316,7 +342,7 @@ class SWDWindow(QMainWindow):
             for key in self.welch['spectrums'].keys():
                 spectrum_plots = [a for a, b in zip(self.spectrum_plots[key], self.swd_state[key]) if b]
                 for n, a in enumerate(self.welch['spectrums'][key]):
-                    spectrum_plots[n].plot(self.welch['x'], a, pen=pg.mkPen(color='w'))
+                    spectrum_plots[self.welch['spectrum_id'][key][n]].plot(self.welch['x'], a, pen=pg.mkPen(color='w'))
         
         console_text = 'Running analysis with:\n' + \
             ''.join([f'{sum(self.swd_state[key])} fragments in {self.swd_names[key]} \n' for key in self.swd_state.keys()]) + '\n' + \
@@ -395,6 +421,7 @@ class MainWindow(pg.GraphicsWindow):
         actionFile.addAction(OpenRawAction)
 
         OpenAnnAction = QAction("Open &annotated file", self)
+        OpenAnnAction.setShortcut("Ctrl+Shift+O")
         OpenAnnAction.triggered.connect(lambda x: self.open_file(ftype='pickle'))
         actionFile.addAction(OpenAnnAction)
 
@@ -465,11 +492,10 @@ class MainWindow(pg.GraphicsWindow):
     
     def open_file(self, ftype='raw'):
         filename = open_file_dialog(ftype)
-        if not filename:
-            return
-        else:
-            self.eeg = open_eeg_file(filename)
-        self.load_eeg(self.eeg)
+        eeg = open_data_file(filename)
+        if eeg:
+            self.eeg = eeg
+            self.load_eeg(self.eeg)
 
 class MainWidget(pg.GraphicsLayoutWidget):
     def __init__(self, eeg, parent=None):
@@ -670,7 +696,6 @@ class EegPlotter(pg.PlotCurveItem):
             a.sort()
             if len(a) > 0:
                 delta_ticks_sec = (a[1] - a[0])/int(self.eeg.info['sfreq'])
-                print(a[1], a[0], delta_ticks_sec)
                 if delta_ticks_sec > 60:
                     tick_formatter = (60, 'min')
                 elif delta_ticks_sec > 3600:
@@ -701,14 +726,13 @@ if __name__ == "__main__":
     eeg = None
 
     filename = pathlib.Path(open('.test_file_path', 'r').read())
-    eeg = open_eeg_file(filename)
-
-    ep = MainWindow(eeg=eeg)
+    # eeg = open_data_file(filename)
+    # ep = MainWindow(eeg=eeg)
 
     # fn = pathlib.Path(r"C:\Data\kenul\raw\28-01-2020_13-51.bdf.pickleWR_5_male_Lcort.csv")
-    # fn1 = pathlib.Path(r"C:\Data\kenul\raw\28-01-2020_13-51.bdf.pickleWR_5_male_Rcort.csv")
+    fn1 = pathlib.Path(r"C:\Users\User\Desktop\sdrnk\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdf.pickleWG_1_male_Cor-0 (2).csv")
 
-    # ep = SWDWindow(None, filenames = [fn, fn1])
+    ep = SWDWindow(None, filenames = [fn1])
     ep.show()
 
     sys.exit(app.exec_())

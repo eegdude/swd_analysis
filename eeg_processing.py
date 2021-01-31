@@ -4,7 +4,7 @@ from scipy import signal, stats
 import numpy as np
 from matplotlib import pyplot as plt
 
-def open_eeg_file(filename:pathlib.Path=None):
+def read_xdf_file(filename:pathlib.Path=None):
     if filename.suffix == '.bdf':
         raw = mne.io.read_raw_bdf(filename, preload=True)
     elif filename.suffix == '.edf':
@@ -19,11 +19,14 @@ def filter_eeg(eeg:mne.io.RawArray):
 def welch_spectrum(swds:dict, swd_state:dict, fs:float=250, nperseg:int=1000, noverlap:int=200, max_freq:float=30, normalize:bool=False):
     x = None
     welch_total = {}
-    for swd_file in swds:
+    spectrum_id_total = {}
+    for n, swd_file in enumerate(swds):
         if sum(swd_state[swd_file]):
             welch_single_file = []
+            spectrum_id_single_file = []
+            
             active_swd = [a for a, b in zip(swds[swd_file], swd_state[swd_file]) if b]
-            for swd in active_swd:
+            for swd_id, swd in enumerate(active_swd):
                 if len(swd) < nperseg:
                     print (f'dropped swd: length {len(swd)} samples is less than welch length {nperseg}')
                 else:
@@ -31,7 +34,10 @@ def welch_spectrum(swds:dict, swd_state:dict, fs:float=250, nperseg:int=1000, no
                         nperseg=nperseg, noverlap=noverlap, detrend=False)
                     x = w[0]
                     w = w[1]
+                    
                     welch_single_file.append(w)
+                    spectrum_id_single_file.append(swd_id)
+
             cutoff = sum(x <= max_freq)
             welch_single_file = np.array(welch_single_file)
             welch_single_file = welch_single_file[:,:cutoff]
@@ -40,8 +46,8 @@ def welch_spectrum(swds:dict, swd_state:dict, fs:float=250, nperseg:int=1000, no
             if normalize:
                 welch_single_file/=np.max(welch_single_file)
             welch_total[swd_file] = welch_single_file
-
-    return {'x':x, 'spectrums':welch_total}
+            spectrum_id_total[swd_file] = spectrum_id_single_file
+    return {'x':x, 'spectrums':welch_total, 'spectrum_id':spectrum_id_total}
 
 def plot_conditions(data:dict, swd_names:dict, canvas):
     canvas.axes.clear()
