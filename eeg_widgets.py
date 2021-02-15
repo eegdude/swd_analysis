@@ -3,6 +3,9 @@ from PyQt5.QtWidgets import *
 import pyqtgraph as pg
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+import config
+
+pg.setConfigOptions(enableExperimental=config.enablePyQTGraphExperimental)
 
 class EEGRegionItem(pg.LinearRegionItem):
     def __init__(self, parent, **kwargs):

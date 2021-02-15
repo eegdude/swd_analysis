@@ -1,8 +1,15 @@
 import mne
 import pathlib
+import pickle
 from scipy import signal, stats
 import numpy as np
+
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import *
+
 from matplotlib import pyplot as plt
+
+import config
 
 def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
     if ftype == 'raw':
@@ -16,14 +23,14 @@ def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
         ftype_filter = 'exported SWD (*.csv) ;; All files(*)'
     
     if multiple_files:
-        filenames, _ = QFileDialog.getOpenFileNames(None, window_name, str(settings.value('LAST_FILE_LOCATION')), ftype_filter)
+        filenames, _ = QFileDialog.getOpenFileNames(None, window_name, str(config.settings.value('LAST_FILE_LOCATION')), ftype_filter)
     else:
-        filename, _ = QFileDialog.getOpenFileName(None, window_name, str(settings.value('LAST_FILE_LOCATION')), ftype_filter)
+        filename, _ = QFileDialog.getOpenFileName(None, window_name, str(config.settings.value('LAST_FILE_LOCATION')), ftype_filter)
         filenames = [filename]
     
     if filenames:
         filenames = [pathlib.Path(f) for f in filenames]
-        settings.setValue('LAST_FILE_LOCATION', filenames[0].parent)
+        config.settings.setValue('LAST_FILE_LOCATION', filenames[0].parent)
     if pathlib.WindowsPath('.') in filenames:                                   # фигня с точкой происходит из-за пустого пути
         return []
     if multiple_files:
@@ -59,14 +66,14 @@ def open_data_file(filename):
                 else:
                     return None
             else:
-                data = eeg_processing.read_xdf_file(eeg_file_path)
+                data = read_xdf_file(eeg_file_path)
 
             eeg = {'data':data,
                 'filename':str(filename)}
             eeg['data'].annotation_dict = intermediate['annotation_dict']
 
     elif filename.suffix == '.bdf' or filename.suffix == '.edf':
-        eeg = {'data':eeg_processing.read_xdf_file(filename),
+        eeg = {'data': read_xdf_file(filename),
                 'filename':str(filename)}
     else:
         QMessageBox.about(None, "No valid EEG", f"No vaild EEG file at {filename}\nYou can load .pickle or .xdf file")

@@ -17,14 +17,11 @@ import yaml
 
 import func
 from eeg_widgets import *
+import config
 
 import logging
-__version__ = 0.1
-acknow = 'Icons made by https://www.flaticon.com/authors/eucalyp'
-settings = QSettings('MSU', 'swd_analysis')
-pg.setConfigOptions(enableExperimental=False)
-settings.setValue('WINDOW_COLOR', '#FFFFFF')
-# settings.clear()
+
+pg.setConfigOptions(enableExperimental=config.enablePyQTGraphExperimental)
 
 class ExportSwdDialog(QDialog):
     def __init__(self, parent):
@@ -310,7 +307,7 @@ class MainWindow(pg.GraphicsWindow):
     def __init__(self, eeg=None):
         super(MainWindow, self).__init__()
         self.eeg = eeg
-        self.setBackground(settings.value('WINDOW_COLOR'))
+        self.setBackground(config.settings.value('WINDOW_COLOR'))
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
         self.create_menu()
@@ -380,8 +377,8 @@ class MainWindow(pg.GraphicsWindow):
         actionAnalysis.addAction(AnalyseSpectrumAction)
         
         menuAbout = menubar.addMenu("About")
-        text = f'Spectrum analyzer: version {__version__}\n' + \
-            'https://github.com/eegdude/swd_analysis/\n' + acknow
+        text = f'Spectrum analyzer: version {config.__version__}\n' + \
+            'https://github.com/eegdude/swd_analysis/\n' + config.acknow
         actionAbout = QAction("&About", self)
         actionAbout.triggered.connect(lambda:QMessageBox.about(self, "Title", text))
         menuAbout.addAction(actionAbout)
@@ -430,7 +427,7 @@ class MainWindow(pg.GraphicsWindow):
 class MainWidget(pg.GraphicsLayoutWidget):
     def __init__(self, eeg, parent=None):
         super(MainWidget, self).__init__(parent)
-        self.setBackground(settings.value('WINDOW_COLOR'))
+        self.setBackground(config.settings.value('WINDOW_COLOR'))
         self.eeg = eeg
 
         if not hasattr(self.eeg, 'annotation_dict'):
