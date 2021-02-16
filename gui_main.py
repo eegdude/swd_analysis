@@ -13,7 +13,7 @@ import sys
 import csv
 import pickle
 import uuid
-import yaml
+import json
 
 import func
 from eeg_widgets import *
@@ -115,6 +115,9 @@ class SWDWindow(QMainWindow):
         self.plot_average_spectrum()
 
     def export_spectrum(self):
+        '''
+        export all valid spectrums
+        '''
         dir = QFileDialog.getExistingDirectory(self, "Select Directory")
         if not dir:
             return
@@ -129,20 +132,32 @@ class SWDWindow(QMainWindow):
                         write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
 
     def export_average_spectrum(self):
-        dir = QFileDialog.getExistingDirectory(self, "Select Directory")
-        if not dir:
+        filepath = QFileDialog.getSaveFileName(self, "Save average spectrum", filter="Comma-separated values (*.csv)")
+        if not filepath[0]:
             return
         else:
-            dir = pathlib.Path(dir)
-
+            filepath = pathlib.Path(filepath[0])
         if hasattr (self, 'welch'):
-            for key in self.welch['spectrums'].keys():
-                data = np.vstack([self.welch['x'], self.welch['spectrums'][key]])
-                average_data = np.average(data, axis=0)
-                print(self.swd_names[key], average_data.shape)
-                # with open(dir / f'spectrum_{self.swd_names[key]}.csv', 'w') as f:
-                #     for line in data.T:
-                #         write_csv_line(file_object=f, line=line
+            spectrum_subset = {}
+            average_spectrum = {}
+            recepit = {}
+            for swd_filepath_key in self.swd_state.keys():
+                sample_name = self.swd_names[swd_filepath_key]
+                mask = [True if self.swd_state[swd_filepath_key][a] else False for a in self.welch['spectrum_id'][swd_filepath_key] ]
+                spectrum_subset[sample_name] = self.welch['spectrums'][swd_filepath_key][mask]
+
+                recepit[sample_name] = [a if self.swd_state[swd_filepath_key][a] else False for a in self.welch['spectrum_id'][swd_filepath_key]]
+                average_spectrum[sample_name] = np.average(spectrum_subset[sample_name], axis=0)
+
+            recepit_path = filepath.parent / (filepath.stem+'_averaging_log.json')
+            
+            with open(recepit_path, 'w') as json_file:
+                json.dump(recepit, json_file, indent=4)
+            with open(filepath, 'w') as f:
+                func.write_csv_line(file_object=f, line=[self.swd_data[swd_filepath_key]['sfreq']]) #only last
+                func.write_csv_line(file_object=f, line=[''] + list(self.welch['x']))
+                for line in average_spectrum.items():
+                    func.write_csv_line(file_object=f, line=[line[0]] + list(line[1]))
 
     def rename_dataset(self):
         old_text, new_text = self.tabs.tbar.old_text, self.tabs.tbar.new_text

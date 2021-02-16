@@ -81,7 +81,7 @@ def open_data_file(filename):
     return eeg
 
 def write_csv_line(file_object, line):
-    file_object.write(';'.join([str(a).replace('.',',') for a in line]) + '\n')
+    file_object.write(';'.join([str(a).replace('.',config.decimal_separator) for a in line]) + '\n')
 
 def read_xdf_file(filename:pathlib.Path=None):
     if filename.suffix == '.bdf':

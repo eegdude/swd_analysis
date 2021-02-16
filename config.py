@@ -7,3 +7,5 @@ settings.setValue('WINDOW_COLOR', '#FFFFFF')
 # settings.clear()
 
 enablePyQTGraphExperimental = False
+
+decimal_separator = ','
