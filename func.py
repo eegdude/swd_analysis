@@ -92,11 +92,15 @@ def read_xdf_file(filename:pathlib.Path=None):
 
 def filter_eeg(eeg:mne.io.RawArray):
     if eeg is not None:
-        eeg = eeg.filter(3, 40, verbose=0)
+        eeg = eeg.filter(config.l_freq, config.h_freq, verbose=0)
     return eeg
 
-def welch_spectrum(swd_data:dict, swd_state:dict, fs:float=250, nperseg_sec:int=4, noverlap:int=200, max_freq:float=30, normalize:bool=False):
+def welch_spectrum(swd_data:dict, swd_state:dict, fs:float=250, 
+    nperseg_sec:int=config.nperseg_sec, noverlap:int=config.noverlap_fraction, 
+    max_freq:float=config.max_freq, normalize:bool=config.normalize):
+
     nperseg_samples = int(nperseg_sec*fs)
+    noverlap_samples = int(nperseg_samples*noverlap)
     x = None
     welch_total = {}
     spectrum_id_total = {}

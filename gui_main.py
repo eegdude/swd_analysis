@@ -57,22 +57,11 @@ class SWDWindow(QMainWindow):
         self.setWindowTitle("Spectral analysis")
         self.setWindowModality(Qt.ApplicationModal)
         if not filenames:
-            filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
-        if not filenames:
+            self.filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
+        else:
+            self.filenames = filenames
+        if not self.filenames:
             self.close()
-
-        self.create_menu()
-
-        self.splitter = QSplitter(Qt.Horizontal)
-        self.setCentralWidget(self.splitter)
-        self.tabs = TabWidget()
-        self.tabs.setMinimumSize(600, 200)
-        self.tabs.resize(600, 200)
-
-
-        self.tabs.tbar._editor.editingFinished.connect(lambda: (self.rename_dataset(), self.stats_mw(), self.plot_average_spectrum()))
-        self.splitter.addWidget(self.tabs)
-        self.tabs_list = []
 
         self.swd_selectors = {}
         self.swd_data = {}
@@ -84,14 +73,34 @@ class SWDWindow(QMainWindow):
 
         self.block_reanalysis = False
         self.quantiles = True
-        for swd_filepath_key in filenames:
+
+    def runnnn(self):
+        self.create_gui()
+        self.load_files()
+        self.create_analysis()
+
+    def load_files(self):
+        for swd_filepath_key in self.filenames:
             self.swd_names[swd_filepath_key] = swd_filepath_key.name
             self.swd_plots[swd_filepath_key] = {}
             self.spectrum_plots[swd_filepath_key] = {}
             self.swd_data[swd_filepath_key] = self.load_swd_from_csv(swd_filepath_key)
             self.swd_state[swd_filepath_key] = [True for a in range(len(self.swd_data[swd_filepath_key]['data']))]
+    
+    def create_gui(self):
+        self.create_menu()
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.setCentralWidget(self.splitter)
+        self.tabs = TabWidget()
+        self.tabs.setMinimumSize(600, 200)
+        self.tabs.resize(600, 200)
+        self.tabs.tbar._editor.editingFinished.connect(lambda: (self.rename_dataset(), self.stats_mw(), self.plot_average_spectrum()))
+        self.splitter.addWidget(self.tabs)
+        self.tabs_list = []
         self.add_plot()
-        
+
+    
+    def create_analysis(self):
         self.run_analysis()
         self.plot_swd_and_spectrums()
         self.stats_mw()
@@ -129,7 +138,7 @@ class SWDWindow(QMainWindow):
                 data = np.vstack([ self.welch['x'], self.welch['spectrums'][key]])
                 with open(dir / f'spectrum_{self.swd_names[key]}.csv', 'w') as f:
                     for line in data.T:
-                        write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
+                        func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
 
     def export_average_spectrum(self):
         filepath = QFileDialog.getSaveFileName(self, "Save average spectrum", filter="Comma-separated values (*.csv)")
@@ -272,20 +281,21 @@ class SWDWindow(QMainWindow):
         self.console.setText(console_text)
 
     def plot_swd_and_spectrums(self):
-            for swd_filepath_key in self.welch['spectrums'].keys():
-                [i.clear() for i in self.spectrum_plots[swd_filepath_key].values()]
-                for swd_id in self.swd_plots[swd_filepath_key].keys():
-                    self.draw_swd_plot(swd_filepath_key, swd_id)
-                    self.draw_spectrum_plot(swd_filepath_key, swd_id)
+        for swd_filepath_key in self.welch['spectrums'].keys():
+            [i.clear() for i in self.spectrum_plots[swd_filepath_key].values()]
+            for swd_id in self.swd_plots[swd_filepath_key].keys():
+                self.draw_swd_plot(swd_filepath_key, swd_id)
+                self.draw_spectrum_plot(swd_filepath_key, swd_id)
     
     def draw_spectrum_plot(self, swd_filepath_key, swd_id):
-        try:
-            spectrum_id = self.welch['spectrum_id'][swd_filepath_key].index(swd_id)
-            p2 = self.spectrum_plots[swd_filepath_key][swd_id]
-            spectrum = self.welch['spectrums'][swd_filepath_key][spectrum_id]
-            p2.plot(self.welch['x'], spectrum, pen=pg.mkPen(color='w'))
-        except ValueError:
-            pass
+        if self.spectrum_plots[swd_filepath_key]:
+            try:
+                spectrum_id = self.welch['spectrum_id'][swd_filepath_key].index(swd_id)
+                p2 = self.spectrum_plots[swd_filepath_key][swd_id]
+                spectrum = self.welch['spectrums'][swd_filepath_key][spectrum_id]
+                p2.plot(self.welch['x'], spectrum, pen=pg.mkPen(color='w'))
+            except ValueError:
+                pass
 
     def draw_swd_plot(self, swd_filepath_key, swd_id):
         plot = self.swd_plots[swd_filepath_key][swd_id]
@@ -317,6 +327,69 @@ class SWDWindow(QMainWindow):
         key = event.key()
         if key == Qt.Key_Control and not event.isAutoRepeat():
             [a.SetScrollable(True) for a in self.tabs_list]
+
+class SpectralWindow(SWDWindow):
+    def __init__(self, parent, filenames:list=None):
+        super(SpectralWindow, self).__init__(parent)
+        self.setWindowTitle("Averaged spectral analysis")
+        self.welch = {}
+        self.welch['spectrums'] = {}
+        self.welch['spectrum_id'] = {}
+        self.welch['rejected_swd'] = {}
+    
+    def create_analysis(self):
+        self.plot_spectrums()
+        self.stats_mw()
+        self.plot_average_spectrum()
+    
+    def plot_spectrums(self):
+        for swd_filepath_key in self.welch['spectrums'].keys():
+            [i.clear() for i in self.spectrum_plots[swd_filepath_key].values()]
+            for swd_id in self.swd_plots[swd_filepath_key].keys():
+                self.draw_swd_plot(swd_filepath_key, swd_id)
+
+    def add_swd_tab(self, swd_array, sfreq, fn):
+        tab = MyScrollArea()
+        tab.setContextMenuPolicy(Qt.CustomContextMenu)
+        tab.customContextMenuRequested.connect(lambda x: self.tab_menu(fn, x))
+
+        self.tabs_list.append(tab)
+        self.tabs.addTab(tab, f"{self.swd_names[fn]}")
+        
+        content_widget = QWidget()
+        layout = QGridLayout(content_widget)
+
+        self.swd_selectors[fn]=[QCheckBox(str(a)) for a in range(len(swd_array))]
+        [layout.addWidget(a) for a in self.swd_selectors[fn]]
+        [sc.setChecked(True) for sc in self.swd_selectors[fn]]
+        [a.toggled.connect(lambda:self.toggleAct(fn)) for a in self.swd_selectors[fn]]
+
+        tab.setWidgetResizable(True)
+        
+        for swd_id, swd in enumerate(swd_array):
+            pdi = pg.GraphicsLayoutWidget()
+            layout.addWidget(pdi, swd_id, 1)
+            p = pdi.addPlot(row=0, col=0)
+            self.swd_plots[fn][swd_id] = p
+        tab.setWidget(content_widget)
+
+    def load_swd_from_csv(self, fn):
+        with open(fn, 'r') as f:
+            reader = csv.reader(f, delimiter=';')
+            rows = [r for r in reader]
+            sfreq = int(float(rows[0][0]))
+            self.welch['x'] = [float(a.replace(',', '.')) for a in rows[1][1:]]
+            spectrum_array = []
+            for row in rows[2:]:
+                names = row[0]
+                spectrum = [float(a.replace(',', '.')) for a in row[1:]]
+                spectrum_array.append(spectrum)
+            self.welch['spectrums'][fn] = np.array(spectrum_array)
+            self.welch['spectrum_id'][fn] = list(range(len(spectrum_array)))
+            self.welch['rejected_swd'][fn] = []
+
+        self.add_swd_tab(spectrum_array, sfreq, fn) #get this out of function
+        return {'sfreq':sfreq, 'data':spectrum_array}
 
 class MainWindow(pg.GraphicsWindow):
     def __init__(self, eeg=None):
@@ -391,6 +464,10 @@ class MainWindow(pg.GraphicsWindow):
         AnalyseSpectrumAction.triggered.connect(self.analyse_spectrum)
         actionAnalysis.addAction(AnalyseSpectrumAction)
         
+        menu7 = QAction("&Average spectrums", self)
+        menu7.triggered.connect(self.compare_avg_spectrum)
+        actionAnalysis.addAction(menu7)
+        
         menuAbout = menubar.addMenu("About")
         text = f'Spectrum analyzer: version {config.__version__}\n' + \
             'https://github.com/eegdude/swd_analysis/\n' + config.acknow
@@ -413,8 +490,14 @@ class MainWindow(pg.GraphicsWindow):
     
     def analyse_spectrum(self):
         self.spectral_analysis = SWDWindow(self)
+        self.spectral_analysis.runnnn()
         self.spectral_analysis.show()
     
+    def compare_avg_spectrum(self):
+        self.spectral_analysis = SpectralWindow(self)
+        self.spectral_analysis.runnnn()
+        self.spectral_analysis.show()
+
     def export_SWD(self):
         if not self.eeg:
             QMessageBox.about(self, "Export SWD", "First load some EEG with annotated SWD!")
@@ -429,7 +512,7 @@ class MainWindow(pg.GraphicsWindow):
                     for annotation in self.eeg_plots.eeg.annotation_dict[ch_name].values():
                         channel = self.eeg_plots.eeg.info['ch_names'].index(ch_name)
                         fragment = self.eeg_plots.eeg[channel][0][0][int(annotation['onset']):int(annotation['onset']+ annotation['duration'])]
-                        write_csv_line(file_object=f, line=fragment) # Excel dialect is not locale-aware :-(
+                        func.write_csv_line(file_object=f, line=fragment) # Excel dialect is not locale-aware :-(
             print ('done exports')
     
     def open_file(self, ftype='raw'):
@@ -661,20 +744,20 @@ class EegPlotter(pg.PlotCurveItem):
         self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
 
 if __name__ == "__main__":
-    logging.basicConfig(format='%(levelname)s	%(processName)s	%(message)s', level=logging.ERROR)
+    logging.basicConfig(format='%(levelname)s	%(processName)s	%(message)s', level=logging.INFO, filename='log.log')
     logging.getLogger()
 
     app = QApplication(sys.argv)
     eeg = None
 
-    filename = pathlib.Path(open('.test_file_path', 'r').read())
-    # eeg = open_data_file(filename)
-    # ep = MainWindow(eeg=eeg)
+    # filename = pathlib.Path(open('.test_file_path', 'r').read())
+    # eeg = func.open_data_file(filename)
+    ep = MainWindow(eeg=eeg)
 
-    # fn = pathlib.Path(r"C:\Data\kenul\raw\28-01-2020_13-51.bdf.pickleWR_5_male_Lcort.csv")
-    fn1 = pathlib.Path(r"C:\Users\User\Desktop\sdrnk\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdf.pickleWG_1_male_Cor-0 (2).csv")
-
-    ep = SWDWindow(None, filenames = [fn1])
-    ep.show()
+    # fn = pathlib.Path(r"C:\Users\User\Desktop\sdrnk\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdf.pickleWG_1_male_Cor-0 (1).csv")
+    # fn1 = pathlib.Path(r"C:\Users\User\Desktop\sdrnk\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdf.pickleWG_1_male_Cor-0 (2).csv")
+    # ep = SpectralWindow(None, filenames = [fn, fn1])
+    # ep.runnnn()
+    # ep.show()
 
     sys.exit(app.exec_())

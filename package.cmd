@@ -1,1 +1,1 @@
-pyinstaller --noconfirm --onedir --windowed --icon "./icon.ico" --name "Spectrum analyzer" "./gui_main.py"
+pyinstaller --noconfirm --onedir --windowed --exclude-module tkinter --add-data config.ini;. --icon "./icon.ico" --name "Spectrum analyzer" "./gui_main.py"
