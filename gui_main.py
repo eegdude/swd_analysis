@@ -71,7 +71,7 @@ class SWDWindow(QMainWindow):
         if not filenames:
             self.filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
         else:
-            self.filenames = filenames.show()
+            self.filenames = filenames
 
     
     def runnnn(self):
