@@ -56,12 +56,6 @@ class SWDWindow(QMainWindow):
         super(SWDWindow, self).__init__()
         self.setWindowTitle("Spectral analysis")
         self.setWindowModality(Qt.ApplicationModal)
-        if not filenames:
-            self.filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
-        else:
-            self.filenames = filenames
-        if not self.filenames:
-            self.close()
 
         self.swd_selectors = {}
         self.swd_data = {}
@@ -73,11 +67,21 @@ class SWDWindow(QMainWindow):
 
         self.block_reanalysis = False
         self.quantiles = True
+        
+        if not filenames:
+            self.filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
+        else:
+            self.filenames = filenames.show()
 
+    
     def runnnn(self):
+        if not self.filenames:
+            self.close()
+            return
         self.create_gui()
         self.load_files()
         self.create_analysis()
+        self.show()
 
     def load_files(self):
         for swd_filepath_key in self.filenames:
@@ -297,7 +301,7 @@ class SWDWindow(QMainWindow):
             except ValueError:
                 pass
 
-    def draw_swd_plot(self, swd_filepath_key, swd_id):
+    def draw_swd_plot(self, swd_filepath_key, swd_id, x:list=None):
         plot = self.swd_plots[swd_filepath_key][swd_id]
         swd = self.swd_data[swd_filepath_key]['data'][swd_id]
         sfreq = self.swd_data[swd_filepath_key]['sfreq']
@@ -309,7 +313,9 @@ class SWDWindow(QMainWindow):
                 color = 'w'
         except ValueError:
             color = 'w'
-        plot.plot(np.arange(len(swd))/sfreq, swd, pen=pg.mkPen(color=color))
+        if not x:
+            x = np.arange(len(swd))/sfreq
+        plot.plot(x, swd, pen=pg.mkPen(color=color))
 
     def toggle_single_swd(self, swd_filepath_key:str, swd_id:int=None):
         if swd_id is None:
@@ -330,7 +336,7 @@ class SWDWindow(QMainWindow):
 
 class SpectralWindow(SWDWindow):
     def __init__(self, parent, filenames:list=None):
-        super(SpectralWindow, self).__init__(parent)
+        super(SpectralWindow, self).__init__(parent, filenames)
         self.setWindowTitle("Averaged spectral analysis")
         self.welch = {}
         self.welch['spectrums'] = {}
@@ -357,7 +363,7 @@ class SpectralWindow(SWDWindow):
         for swd_filepath_key in self.welch['spectrums'].keys():
             [i.clear() for i in self.spectrum_plots[swd_filepath_key].values()]
             for swd_id in self.swd_plots[swd_filepath_key].keys():
-                self.draw_swd_plot(swd_filepath_key, swd_id)
+                self.draw_swd_plot(swd_filepath_key, swd_id, x = self.welch['x'])
 
     def add_swd_tab(self, swd_array, sfreq, fn):
         tab = MyScrollArea()
@@ -502,12 +508,10 @@ class MainWindow(pg.GraphicsWindow):
     def analyse_spectrum(self):
         self.spectral_analysis = SWDWindow(self)
         self.spectral_analysis.runnnn()
-        self.spectral_analysis.show()
     
     def compare_avg_spectrum(self):
         self.spectral_analysis = SpectralWindow(self)
         self.spectral_analysis.runnnn()
-        self.spectral_analysis.show()
 
     def export_SWD(self):
         if not self.eeg:
