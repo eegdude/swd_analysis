@@ -114,10 +114,10 @@ class SWDWindow(QMainWindow):
 
         export_action = menu.addAction("Export average spectral data")
         export_action.triggered.connect(self.export_average_spectrum)
-
-        quantile_action = QAction('Plot quantiles', menu, checkable=True, checked=True)
+        menu2 = menubar.addMenu('Analysis')
+        quantile_action = QAction('Plot quantiles', menu2, checkable=True, checked=True)
         quantile_action.triggered.connect(self.plot_quantiles)
-        menu.addAction(quantile_action)
+        menu2.addAction(quantile_action)
 
     def plot_quantiles(self):
         self.quantiles=self.sender().isChecked()
@@ -336,8 +336,18 @@ class SpectralWindow(SWDWindow):
         self.welch['spectrums'] = {}
         self.welch['spectrum_id'] = {}
         self.welch['rejected_swd'] = {}
-    
+
+    def create_menu(self):
+        menubar = self.menuBar()
+        menu = menubar.addMenu('File')
         export_action = menu.addAction("Export spectral data")
+        export_action.triggered.connect(self.export_spectrum)
+        menu2 = menubar.addMenu('Analysis')
+        quantile_action = QAction('Plot quantiles', menu2, checkable=True, checked=True)
+        quantile_action.triggered.connect(self.plot_quantiles)
+        menu2.addAction(quantile_action)
+
+
     def create_analysis(self):
         self.plot_spectrums()
         self.stats_mw()
