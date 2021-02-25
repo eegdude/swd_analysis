@@ -337,6 +337,7 @@ class SpectralWindow(SWDWindow):
         self.welch['spectrum_id'] = {}
         self.welch['rejected_swd'] = {}
     
+        export_action = menu.addAction("Export spectral data")
     def create_analysis(self):
         self.plot_spectrums()
         self.stats_mw()
