@@ -16,6 +16,18 @@ class EEGRegionItem(pg.LinearRegionItem):
         if ev.button() == Qt.RightButton:
             self.parent.remove_annotation(self)
 
+class MyGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
+    def __init__(self, **kwargs):
+        super(MyGraphicsLayoutWidget, self).__init__(**kwargs)
+        self.scrollable = False
+
+    def wheelEvent(self, ev):
+        if self.scrollable:
+            pg.GraphicsLayoutWidget.wheelEvent(self, ev)
+    
+    def SetScrollable(self, scrollable:bool):
+        self.scrollable = scrollable
+
 class MyScrollArea(QScrollArea):
     def __init__(self, *args, **kwargs):
         super(MyScrollArea, self).__init__(*args, **kwargs)

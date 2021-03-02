@@ -1,7 +1,7 @@
 import mne
 import pathlib
 import pickle
-from scipy import signal, stats
+from scipy import signal, stats, interpolate, integrate
 import numpy as np
 
 from PyQt5.QtCore import *
@@ -141,6 +141,38 @@ def welch_spectrum(swd_data:dict, swd_state:dict, fs:float=250,
             rejected_swd[swd_file] = rejected_swd_single_file
 
     return {'x':x, 'spectrums':welch_total, 'spectrum_id':spectrum_id_total, 'rejected_swd':rejected_swd}
+
+def asymmetry(swd_data:dict, swd_state:dict, peak_prominence_percentage_from_minmax:float = config.peak_prominence_percentage_from_minmax):
+    asymmetry_total = {}
+    envelope_id_total = {}
+    rejected_swd = {}
+    for n, swd_file in enumerate(swd_data):
+        if sum(swd_state[swd_file]):
+            envelope_single_file = []
+            envelope_id_single_file = []
+            rejected_swd_single_file = []
+            for swd_id, swd in enumerate(swd_data[swd_file]['data']):
+                swd = np.array(swd)
+                peaks_upper = signal.find_peaks(swd, prominence = (np.max(swd)-np.min(swd))/4 )[0]
+                peaks_lower = signal.find_peaks(swd*-1, prominence = (np.max(swd)-np.min(swd))/4 )[0]
+    
+                swd_u = interpolate.interp1d(peaks_upper,  np.array([swd[a] for a in peaks_upper]), kind='cubic')(np.arange(peaks_upper[0],peaks_upper[-1]))
+                swd_d = interpolate.interp1d(peaks_lower,  np.array([swd[a] for a in peaks_lower]), kind='cubic')(np.arange(peaks_lower[0],peaks_lower[-1]))
+
+                u = integrate.trapz(swd_u)
+                d = integrate.trapz(swd_d*-1)
+
+                assym_integrated = np.abs(u/d)
+                assym_raw = np.abs(np.sum([a if a >0 else 0 for a in swd])/np.sum([a if a <0 else 0 for a in swd]))
+                assym_peaks = np.abs(np.mean(swd[peaks_upper]) / np.mean(swd[peaks_lower]))
+
+                envelope_single_file.append({'peaks_lower':peaks_lower, 'peaks_upper':peaks_upper, 'spline_lower':swd_d, 'spline_upper':swd_u, 'assym_integrated':assym_integrated, 'assym_raw':assym_raw, 'assym_peaks':assym_peaks})
+                envelope_id_single_file.append(swd_id)
+
+            envelope_id_total[swd_file] = envelope_id_single_file
+            rejected_swd[swd_file] = rejected_swd_single_file
+            asymmetry_total[swd_file] = envelope_single_file
+    return {'asymmetry':asymmetry_total}
 
 def plot_conditions(data:dict, swd_names:dict, swd_state:dict, canvas, plot_quantiles):
     canvas.axes.clear()

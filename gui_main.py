@@ -1,5 +1,7 @@
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
+from PyQt5.QtGui import *
+
 import pyqtgraph as pg
 
 import matplotlib
@@ -60,20 +62,23 @@ class SWDWindow(QMainWindow):
         self.swd_selectors = {}
         self.swd_data = {}
         self.swd_state = {}
+        self.graphics_layouts = {}
         self.swd_plots = {}
         self.spectrum_plots = {}
         self.swd_names = {}
         self.stats = {}
 
         self.block_reanalysis = False
-        self.quantiles = True
+        
+        self.plot_quantiles = True
+        self.plot_envelopes = True
+        self.plot_peaks = False
         
         if not filenames:
             self.filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
         else:
             self.filenames = filenames
 
-    
     def runnnn(self):
         if not self.filenames:
             self.close()
@@ -92,6 +97,11 @@ class SWDWindow(QMainWindow):
             self.swd_state[swd_filepath_key] = [True for a in range(len(self.swd_data[swd_filepath_key]['data']))]
     
     def create_gui(self):
+        self.ep = QShortcut(QKeySequence('Ctrl+='), self)
+        self.ep.activated.connect(self.expand_plots)
+        self.sp = QShortcut(QKeySequence('Ctrl+-'), self)
+        self.sp.activated.connect(self.shrink_plots)
+
         self.create_menu()
         self.splitter = QSplitter(Qt.Horizontal)
         self.setCentralWidget(self.splitter)
@@ -103,6 +113,17 @@ class SWDWindow(QMainWindow):
         self.tabs_list = []
         self.add_plot()
 
+    def shrink_plots(self):
+        for fn in self.graphics_layouts.keys():
+            for p in self.graphics_layouts[fn]:
+                newsize = QSize(int(p.size().width()*0.9), int(p.size().height()*0.9))
+                p.setMinimumSize(newsize)
+
+    def expand_plots(self):
+        for fn in self.graphics_layouts.keys():
+            for p in self.graphics_layouts[fn]:
+                newsize = QSize(int(p.size().width()*1.1), int(p.size().height()*1.1))
+                p.setMinimumSize(newsize)
     
     def create_analysis(self):
         self.run_analysis()
@@ -113,19 +134,43 @@ class SWDWindow(QMainWindow):
     def create_menu(self):
         menubar = self.menuBar()
         menu = menubar.addMenu('File')
-        export_action = menu.addAction("Export spectral data")
-        export_action.triggered.connect(self.export_spectrum)
+        export_action1 = menu.addAction("Export spectral data")
+        export_action1.triggered.connect(self.export_spectrum)
 
-        export_action = menu.addAction("Export average spectral data")
-        export_action.triggered.connect(self.export_average_spectrum)
+        export_action2 = menu.addAction("Export average spectral data")
+        export_action2.triggered.connect(self.export_average_spectrum)
+        
+        export_action3 = menu.addAction("Export asymmetry")
+        export_action3.triggered.connect(self.export_asymmetry)
+        
         menu2 = menubar.addMenu('Analysis')
         quantile_action = QAction('Plot quantiles', menu2, checkable=True, checked=True)
-        quantile_action.triggered.connect(self.plot_quantiles)
+        quantile_action.triggered.connect(self.plot_quantiles_func)
         menu2.addAction(quantile_action)
 
-    def plot_quantiles(self):
-        self.quantiles=self.sender().isChecked()
+        envelope_action = QAction('Plot envelopes', menu2, checkable=True, checked=True)
+        envelope_action.triggered.connect(self.plot_envelopes_func)
+        menu2.addAction(envelope_action)
+
+        plot_peaks_action = QAction('Plot peaks', menu2, checkable=True, checked=False)
+        plot_peaks_action.triggered.connect(self.plot_peaks_func)
+        menu2.addAction(plot_peaks_action)
+    
+    def plot_quantiles_func(self):
+        self.plot_quantiles=self.sender().isChecked()
         self.plot_average_spectrum()
+
+    def plot_envelopes_func(self):
+        self.plot_envelopes=self.sender().isChecked()
+        for swd_filepath_key in self.swd_plots.keys():
+            for swd_id, plot in enumerate(self.swd_plots[swd_filepath_key]):
+                self.draw_swd_plot(swd_filepath_key, swd_id)
+    
+    def plot_peaks_func(self):
+        self.plot_peaks=self.sender().isChecked()
+        for swd_filepath_key in self.swd_plots.keys():
+            for swd_id, plot in enumerate(self.swd_plots[swd_filepath_key]):
+                self.draw_swd_plot(swd_filepath_key, swd_id)
 
     def export_spectrum(self):
         '''
@@ -140,12 +185,50 @@ class SWDWindow(QMainWindow):
         if hasattr (self, 'welch'):
             for key in self.welch['spectrums'].keys():
                 data = np.vstack([ self.welch['x'], self.welch['spectrums'][key]])
-                with open(dir / f'spectrum_{self.swd_names[key]}.csv', 'w') as f:
+                with open(dir / f'{self.swd_names[key]}.spectrum.csv', 'w') as f:
+                    for line in data.T:
+                        func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
+
+    def export_asymmetry(self):
+        dir = QFileDialog.getExistingDirectory(self, "Select Directory")
+        if not dir:
+            return
+        else:
+            dir = pathlib.Path(dir)
+        if self.asymmetry:
+            recepit = {}
+            for swd_filepath_key in self.asymmetry['asymmetry'].keys():
+                file_assym = self.asymmetry['asymmetry'][swd_filepath_key]
+
+                mask = [True if self.swd_state[swd_filepath_key][swd_id] else False for swd_id, _ in enumerate(file_assym)]
+                recepit[self.swd_names[swd_filepath_key]] = [swd_id if self.swd_state[swd_filepath_key][swd_id] else False for swd_id, _ in enumerate(file_assym)]
+                # peaks_upper = [file_assym[swd_id]['peaks_upper'] for swd_id, _ in enumerate(file_assym)]
+                # peaks_lower = [file_assym[swd_id]['peaks_lower'] for swd_id, _ in enumerate(file_assym)]
+                # peaks_upper = [a for n, a in enumerate(peaks_upper) if mask[n]]
+                # peaks_lower = [a for n, a in enumerate(peaks_lower) if mask[n]]
+                assym_integrated = [file_assym[swd_id]['assym_integrated'] for swd_id, _ in enumerate(file_assym)]
+                assym_integrated = [a for n, a in enumerate(assym_integrated) if mask[n]]
+                assym_raw = [file_assym[swd_id]['assym_raw'] for swd_id, _ in enumerate(file_assym)]
+                assym_raw = [a for n, a in enumerate(assym_raw) if mask[n]]
+                assym_peaks = [file_assym[swd_id]['assym_peaks'] for swd_id, _ in enumerate(file_assym)]
+                assym_peaks = [a for n, a in enumerate(assym_peaks) if mask[n]]
+                
+                data = np.array([assym_integrated, assym_raw, assym_peaks])
+
+                csv_path = dir / f'{self.swd_names[swd_filepath_key]}.asymmetry.csv'
+                recepit_path = csv_path.parent / (csv_path.stem+'_asymmetry_log.json')
+                
+                with open(recepit_path, 'w') as json_file:
+                    json.dump(recepit, json_file, indent=4)
+                
+                with open(csv_path, 'w') as f:
+                    header = ['peaks', 'spline', 'raw']
+                    func.write_csv_line(file_object=f, line=header)
                     for line in data.T:
                         func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
 
     def export_average_spectrum(self):
-        filepath = QFileDialog.getSaveFileName(self, "Save average spectrum", filter="Comma-separated values (*.csv)")
+        filepath = QFileDialog.getSaveFileName(self, "Save average spectrum", filter="Comma-separated values (*.average_spectrum.csv)")
         if not filepath[0]:
             return
         else:
@@ -204,6 +287,7 @@ class SWDWindow(QMainWindow):
             
     def add_swd_tab(self, swd_array, sfreq, fn):
         tab = MyScrollArea()
+        tab.setWidgetResizable(True)
         tab.setContextMenuPolicy(Qt.CustomContextMenu)
         tab.customContextMenuRequested.connect(lambda x: self.tab_menu(fn, x))
 
@@ -214,19 +298,21 @@ class SWDWindow(QMainWindow):
         layout = QGridLayout(content_widget)
 
         self.swd_selectors[fn]=[QCheckBox(str(a)) for a in range(len(swd_array))]
+        # [a.setSizePolicy( QSizePolicy.Fixed, QSizePolicy.Expanding) for a in self.swd_selectors[fn]]
+        
         [layout.addWidget(a) for a in self.swd_selectors[fn]]
         [sc.setChecked(True) for sc in self.swd_selectors[fn]]
         [a.toggled.connect(lambda:self.toggleAct(fn)) for a in self.swd_selectors[fn]]
 
-        tab.setWidgetResizable(True)
+        self.graphics_layouts[fn] = [MyGraphicsLayoutWidget() for a in range(len(swd_array))]
         
         for swd_id, swd in enumerate(swd_array):
-            pdi = pg.GraphicsLayoutWidget()
-            layout.addWidget(pdi, swd_id, 1)
-            p = pdi.addPlot(row=0, col=0)
+            layout.addWidget(self.graphics_layouts[fn][swd_id], swd_id, 1)
+            p = self.graphics_layouts[fn][swd_id].addPlot(row=0, col=0)
+            p.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.swd_plots[fn][swd_id] = p
             
-            p2 = pdi.addPlot(row=0, col=1)
+            p2 = self.graphics_layouts[fn][swd_id].addPlot(row=0, col=1)
             self.spectrum_plots[fn][swd_id] = p2
 
         tab.setWidget(content_widget)
@@ -260,6 +346,7 @@ class SWDWindow(QMainWindow):
             return
         else:
             self.welch = func.welch_spectrum(self.swd_data, self.swd_state, normalize=False)
+            self.asymmetry = func.asymmetry(self.swd_data, self.swd_state)
             self.block_reanalysis = True
             for swd_filepath_key in self.swd_state:
                 for swd_id in self.welch['rejected_swd'][swd_filepath_key]:
@@ -273,7 +360,7 @@ class SWDWindow(QMainWindow):
         self.stats['mw'] = mw
     
     def plot_average_spectrum(self):
-        func.plot_conditions(self.welch, self.swd_names, self.swd_state, self.sc, self.quantiles)
+        func.plot_conditions(self.welch, self.swd_names, self.swd_state, self.sc, self.plot_quantiles)
         console_text = 'Running analysis with:\n' + \
             ''.join([f'{sum(self.swd_state[swd_filepath_key])} valid spectrums in {self.swd_names[swd_filepath_key]} \n' for swd_filepath_key in self.swd_state.keys()]) + '\n' + \
             'Frequency\tTest statistic\tp\n'
@@ -303,6 +390,7 @@ class SWDWindow(QMainWindow):
 
     def draw_swd_plot(self, swd_filepath_key, swd_id, x:list=None):
         plot = self.swd_plots[swd_filepath_key][swd_id]
+        plot.clear()
         swd = self.swd_data[swd_filepath_key]['data'][swd_id]
         sfreq = self.swd_data[swd_filepath_key]['sfreq']
         try:
@@ -316,6 +404,21 @@ class SWDWindow(QMainWindow):
         if not x:
             x = np.arange(len(swd))/sfreq
         plot.plot(x, swd, pen=pg.mkPen(color=color))
+        if self.asymmetry:
+            peaks_upper = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['peaks_upper']
+            spline_upper = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['spline_upper']
+            peaks_lower = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['peaks_lower']
+            spline_lower = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['spline_lower']
+
+            if self.plot_envelopes:
+                # print((peaks_upper, len(swd), spline_upper.shape[0]))
+                plot.plot(np.linspace(x[peaks_upper[0]], x[peaks_upper[-1]], spline_upper.shape[0]), spline_upper, pen="FF0")
+                plot.plot(np.linspace(x[peaks_lower[0]], x[peaks_lower[-1]], spline_lower.shape[0]), spline_lower, pen="FF0")
+        
+            if self.plot_peaks:
+                plot.plot([x[a] for a in peaks_upper], [swd[a] for a in peaks_upper], pen=None, brush="FF0", symbolSize=6)
+                plot.plot([x[a] for a in peaks_lower], [swd[a] for a in peaks_lower], pen=None, brush="F0F", symbolSize=6)
+
 
     def toggle_single_swd(self, swd_filepath_key:str, swd_id:int=None):
         if swd_id is None:
@@ -328,11 +431,16 @@ class SWDWindow(QMainWindow):
         key = event.key()
         if key == Qt.Key_Control and not event.isAutoRepeat():
             [a.SetScrollable(False) for a in self.tabs_list]
+            for swd_filepath_key in self.swd_plots.keys():
+                [a.SetScrollable(True) for a in self.graphics_layouts[swd_filepath_key]]
+
     
     def keyReleaseEvent(self, event):
         key = event.key()
         if key == Qt.Key_Control and not event.isAutoRepeat():
             [a.SetScrollable(True) for a in self.tabs_list]
+            for swd_filepath_key in self.swd_plots.keys():
+                [a.SetScrollable(False) for a in self.graphics_layouts[swd_filepath_key]]
 
 class SpectralWindow(SWDWindow):
     def __init__(self, parent, filenames:list=None):
@@ -342,6 +450,7 @@ class SpectralWindow(SWDWindow):
         self.welch['spectrums'] = {}
         self.welch['spectrum_id'] = {}
         self.welch['rejected_swd'] = {}
+        self.asymmetry = {}
 
     def create_menu(self):
         menubar = self.menuBar()
@@ -350,9 +459,8 @@ class SpectralWindow(SWDWindow):
         export_action.triggered.connect(self.export_spectrum)
         menu2 = menubar.addMenu('Analysis')
         quantile_action = QAction('Plot quantiles', menu2, checkable=True, checked=True)
-        quantile_action.triggered.connect(self.plot_quantiles)
+        quantile_action.triggered.connect(self.plot_quantiles_func)
         menu2.addAction(quantile_action)
-
 
     def create_analysis(self):
         self.plot_spectrums()
@@ -376,6 +484,8 @@ class SpectralWindow(SWDWindow):
         content_widget = QWidget()
         layout = QGridLayout(content_widget)
 
+        self.graphics_layouts[fn] = [MyGraphicsLayoutWidget() for a in range(len(swd_array))]
+
         self.swd_selectors[fn]=[QCheckBox(str(a)) for a in range(len(swd_array))]
         [layout.addWidget(a) for a in self.swd_selectors[fn]]
         [sc.setChecked(True) for sc in self.swd_selectors[fn]]
@@ -384,9 +494,8 @@ class SpectralWindow(SWDWindow):
         tab.setWidgetResizable(True)
         
         for swd_id, swd in enumerate(swd_array):
-            pdi = pg.GraphicsLayoutWidget()
-            layout.addWidget(pdi, swd_id, 1)
-            p = pdi.addPlot(row=0, col=0)
+            layout.addWidget(self.graphics_layouts[fn][swd_id], swd_id, 1)
+            p = self.graphics_layouts[fn][swd_id].addPlot(row=0, col=0)
             self.swd_plots[fn][swd_id] = p
         tab.setWidget(content_widget)
 
@@ -570,8 +679,8 @@ class MainWidget(pg.GraphicsLayoutWidget):
         [self.menu_layout.addWidget(a) for a in self.channel_selectors]
         [a.toggled.connect(self.switch_channels) for a in self.channel_selectors]
         
-        self.channel_selectors[0].setChecked(True) # Development
-        self.channel_selectors[1].setChecked(True)
+        [a.setChecked(True) for a in self.channel_selectors]
+        # self.channel_selectors[1].setChecked(True)
 
     def create_eeg_plot(self, channel:int=0):
         ch_name = self.eeg.info['ch_names'][channel]
@@ -765,14 +874,19 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     eeg = None
 
+
+
+    # fn = pathlib.Path(r"C:\Data\kenul\raw\sdrnk\Эксперимент\t.csv")
+    # fn1 = pathlib.Path(r"C:\Data\kenul\raw\sdrnk\Эксперимент\t1.csv")
+    # ep = SpectralWindow(None, filenames = [fn, fn1])
+
+    # fn_swd1 = pathlib.Path(r'C:\Data\kenul\raw\Данные_Сидоренко\Эксперимент\Exp_20-01-2021_11-21.bdfWG_8_male_Cor-1.csv')
+    # fn_swd2 = pathlib.Path(r'C:\Data\kenul\raw\Данные_Сидоренко\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdfWG_2_male_Cor-0.csv')
+
+    # ep = SWDWindow(None, filenames = [fn_swd1, fn_swd2])
+    # ep.runnnn()
+
     # filename = pathlib.Path(open('.test_file_path', 'r').read())
     # eeg = func.open_data_file(filename)
     ep = MainWindow(eeg=eeg)
-
-    # fn = pathlib.Path(r"C:\Users\User\Desktop\sdrnk\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdf.pickleWG_1_male_Cor-0 (1).csv")
-    # fn1 = pathlib.Path(r"C:\Users\User\Desktop\sdrnk\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdf.pickleWG_1_male_Cor-0 (2).csv")
-    # ep = SpectralWindow(None, filenames = [fn, fn1])
-    # ep.runnnn()
-    # ep.show()
-
     sys.exit(app.exec_())
