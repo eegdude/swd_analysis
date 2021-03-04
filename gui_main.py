@@ -202,20 +202,24 @@ class SWDWindow(QMainWindow):
 
                 mask = [True if self.swd_state[swd_filepath_key][swd_id] else False for swd_id, _ in enumerate(file_assym)]
                 recepit[self.swd_names[swd_filepath_key]] = [swd_id if self.swd_state[swd_filepath_key][swd_id] else False for swd_id, _ in enumerate(file_assym)]
-                # peaks_upper = [file_assym[swd_id]['peaks_upper'] for swd_id, _ in enumerate(file_assym)]
-                # peaks_lower = [file_assym[swd_id]['peaks_lower'] for swd_id, _ in enumerate(file_assym)]
-                # peaks_upper = [a for n, a in enumerate(peaks_upper) if mask[n]]
-                # peaks_lower = [a for n, a in enumerate(peaks_lower) if mask[n]]
-                assym_integrated = [file_assym[swd_id]['assym_integrated'] for swd_id, _ in enumerate(file_assym)]
-                assym_integrated = [a for n, a in enumerate(assym_integrated) if mask[n]]
-                assym_raw = [file_assym[swd_id]['assym_raw'] for swd_id, _ in enumerate(file_assym)]
-                assym_raw = [a for n, a in enumerate(assym_raw) if mask[n]]
-                assym_peaks = [file_assym[swd_id]['assym_peaks'] for swd_id, _ in enumerate(file_assym)]
-                assym_peaks = [a for n, a in enumerate(assym_peaks) if mask[n]]
-                minmax = [file_assym[swd_id]['minmax'] for swd_id, _ in enumerate(file_assym)]
-                minmax = [a for n, a in enumerate(minmax) if mask[n]]
 
-                data = np.array([assym_integrated, assym_raw, assym_peaks, minmax])
+
+                assym_peaks = [file_assym[swd_id]['assym_peaks'] for swd_id, _ in enumerate(file_assym)]
+                spline_lower_integtal = [file_assym[swd_id]['spline_lower_integtal'] for swd_id, _ in enumerate(file_assym)]
+                spline_upper_integtal = [file_assym[swd_id]['spline_upper_integtal'] for swd_id, _ in enumerate(file_assym)]
+                minmax = [file_assym[swd_id]['minmax'] for swd_id, _ in enumerate(file_assym)]
+                minmax_mean_peaks = [file_assym[swd_id]['minmax_mean_peaks'] for swd_id, _ in enumerate(file_assym)]
+                minmax_spline = [file_assym[swd_id]['minmax_spline'] for swd_id, _ in enumerate(file_assym)]
+                length = [file_assym[swd_id]['length'] for swd_id, _ in enumerate(file_assym)]
+
+                data = np.array([assym_peaks, spline_lower_integtal, spline_upper_integtal,
+                    minmax, minmax_mean_peaks, minmax_spline,
+                    length])
+                header = ['peaks', 'spline_l', 'spline_u',
+                    'minmax', 'mimax_peaks', 'minmax_spline',
+                    'length']
+
+                data = data[:,mask]
 
                 csv_path = dir / f'{self.swd_names[swd_filepath_key]}.asymmetry.csv'
                 recepit_path = csv_path.parent / (csv_path.stem+'_asymmetry_log.json')
@@ -224,7 +228,6 @@ class SWDWindow(QMainWindow):
                     json.dump(recepit, json_file, indent=4)
                 
                 with open(csv_path, 'w') as f:
-                    header = ['peaks', 'spline', 'raw', 'minmax']
                     func.write_csv_line(file_object=f, line=header)
                     for line in data.T:
                         func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
@@ -270,6 +273,9 @@ class SWDWindow(QMainWindow):
             swd_array = []
             for row in rows[1:]:
                 swd = [float(a.replace(',', '.')) for a in row]
+                if config.invert_SWD:
+                    swd = [a*-1 for a in swd]
+                
                 swd_array.append(swd)
         self.add_swd_tab(swd_array, sfreq, fn) #get this out of function
         return {'sfreq':sfreq, 'data':swd_array}
@@ -357,7 +363,7 @@ class SWDWindow(QMainWindow):
             self.block_reanalysis = False
     
     def stats_mw(self):
-        significant_freqs, mw = func.statistics_nonparametric(self.welch, self.swd_state, correction=True)
+        significant_freqs, mw = func.statistics_nonparametric(self.welch, self.swd_state)
         self.stats['significance'] = significant_freqs
         self.stats['mw'] = mw
     
