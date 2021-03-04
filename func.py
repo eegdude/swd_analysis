@@ -153,8 +153,10 @@ def asymmetry(swd_data:dict, swd_state:dict, peak_prominence_percentage_from_min
             rejected_swd_single_file = []
             for swd_id, swd in enumerate(swd_data[swd_file]['data']):
                 swd = np.array(swd)
-                peaks_upper = signal.find_peaks(swd, prominence = (np.max(swd)-np.min(swd))/4 )[0]
-                peaks_lower = signal.find_peaks(swd*-1, prominence = (np.max(swd)-np.min(swd))/4 )[0]
+
+                minmax = np.max(swd)-np.min(swd)
+                peaks_upper = signal.find_peaks(swd, prominence = minmax/4 )[0]
+                peaks_lower = signal.find_peaks(swd*-1, prominence = minmax/4 )[0]
     
                 swd_u = interpolate.interp1d(peaks_upper,  np.array([swd[a] for a in peaks_upper]), kind='cubic')(np.arange(peaks_upper[0],peaks_upper[-1]))
                 swd_d = interpolate.interp1d(peaks_lower,  np.array([swd[a] for a in peaks_lower]), kind='cubic')(np.arange(peaks_lower[0],peaks_lower[-1]))
@@ -166,7 +168,7 @@ def asymmetry(swd_data:dict, swd_state:dict, peak_prominence_percentage_from_min
                 assym_raw = np.abs(np.sum([a if a >0 else 0 for a in swd])/np.sum([a if a <0 else 0 for a in swd]))
                 assym_peaks = np.abs(np.mean(swd[peaks_upper]) / np.mean(swd[peaks_lower]))
 
-                envelope_single_file.append({'peaks_lower':peaks_lower, 'peaks_upper':peaks_upper, 'spline_lower':swd_d, 'spline_upper':swd_u, 'assym_integrated':assym_integrated, 'assym_raw':assym_raw, 'assym_peaks':assym_peaks})
+                envelope_single_file.append({'peaks_lower':peaks_lower, 'peaks_upper':peaks_upper, 'spline_lower':swd_d, 'spline_upper':swd_u, 'assym_integrated':assym_integrated, 'assym_raw':assym_raw, 'assym_peaks':assym_peaks, 'minmax':minmax})
                 envelope_id_single_file.append(swd_id)
 
             envelope_id_total[swd_file] = envelope_id_single_file

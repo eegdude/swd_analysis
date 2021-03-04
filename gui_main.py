@@ -212,8 +212,10 @@ class SWDWindow(QMainWindow):
                 assym_raw = [a for n, a in enumerate(assym_raw) if mask[n]]
                 assym_peaks = [file_assym[swd_id]['assym_peaks'] for swd_id, _ in enumerate(file_assym)]
                 assym_peaks = [a for n, a in enumerate(assym_peaks) if mask[n]]
-                
-                data = np.array([assym_integrated, assym_raw, assym_peaks])
+                minmax = [file_assym[swd_id]['minmax'] for swd_id, _ in enumerate(file_assym)]
+                minmax = [a for n, a in enumerate(minmax) if mask[n]]
+
+                data = np.array([assym_integrated, assym_raw, assym_peaks, minmax])
 
                 csv_path = dir / f'{self.swd_names[swd_filepath_key]}.asymmetry.csv'
                 recepit_path = csv_path.parent / (csv_path.stem+'_asymmetry_log.json')
@@ -222,7 +224,7 @@ class SWDWindow(QMainWindow):
                     json.dump(recepit, json_file, indent=4)
                 
                 with open(csv_path, 'w') as f:
-                    header = ['peaks', 'spline', 'raw']
+                    header = ['peaks', 'spline', 'raw', 'minmax']
                     func.write_csv_line(file_object=f, line=header)
                     for line in data.T:
                         func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
