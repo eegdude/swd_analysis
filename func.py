@@ -9,6 +9,8 @@ from PyQt5.QtWidgets import *
 
 from matplotlib import pyplot as plt
 
+import datetime
+
 import config
 
 def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
@@ -238,3 +240,12 @@ def statistics_nonparametric(data:dict, swd_state:dict, correction:bool=True):
     if not significant_values.shape[0]:
         print ('no signifncant values found')
     return significant_values, mw
+
+def timesrting_from_sample(sample_time, sfreq, level=None):
+    if level == 'ms':
+        ts = datetime.datetime.utcfromtimestamp(sample_time/sfreq).strftime("%H:%M:%S.%f")[:-3]
+    elif level == 's':
+        ts = datetime.datetime.utcfromtimestamp(sample_time/sfreq).strftime("%H:%M:%S")
+    elif level == 'm':
+        ts = datetime.datetime.utcfromtimestamp(sample_time/sfreq).strftime("%H:%M")
+    return ts

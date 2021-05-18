@@ -854,15 +854,13 @@ class EegPlotter(pg.PlotCurveItem):
             if len(a) > 0:
                 delta_ticks_sec = (a[1] - a[0])/int(self.eeg.info['sfreq'])
                 if delta_ticks_sec > 60:
-                    tick_formatter = (60, 'min')
-                elif delta_ticks_sec > 3600:
-                    tick_formatter = (3600, 'hour')
+                    level = 'm'
                 elif delta_ticks_sec < 1:
-                    tick_formatter = (0.001,'ms')
+                    level = 'ms'
                 else:
-                    tick_formatter = (1,'')
+                    level = 's'
 
-            tv = [[[v, '{:.0f} {}'.format(v/int(self.eeg.info['sfreq'])/tick_formatter[0], tick_formatter[1])] for v in tick_level[1]] for tick_level in tv]
+            tv = [[[v, func.timesrting_from_sample(v, self.eeg.info['sfreq'], level)] for v in tick_level[1]] for tick_level in tv]
             ax.setTicks(tv)
         
         if self.eeg_stop:
