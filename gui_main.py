@@ -691,12 +691,20 @@ class MainWidget(pg.GraphicsLayoutWidget):
         # self.channel_selectors[1].setChecked(True)
 
     def create_eeg_plot(self, channel:int=0):
-        ch_name = self.eeg.info['ch_names'][channel]
+        ch_name = self.eeg.raw.info['ch_names'][channel]
         p = pg.PlotWidget(background='#000000', title=ch_name)
         p.setAntialiasing(True)
         eeg_plot = EegPlotter(eeg=self.eeg, channel=channel, parent=p)
         p.addItem(eeg_plot, name = ch_name, title=ch_name)
-        self.eeg_layout.addWidget(p)
+
+        displayed_channels = [self.eeg.raw.info['ch_names'].index(a) for a in self.eeg_plots.keys()]
+        w = np.where((np.array(displayed_channels) - channel)>0)[0]
+        if np.size(w):
+            position = max(0, np.min(w))
+        else:
+            position = channel
+
+        self.eeg_layout.insertWidget(position, p)
         self.eeg_plots[ch_name] = {'PlotWidget':p, 'Curve':eeg_plot}
         self.link_plots()
         return eeg_plot
