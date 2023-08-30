@@ -1,3 +1,6 @@
+from locale import normalize
+import stat
+from sys import float_repr_style
 import mne
 import pathlib
 import pickle
@@ -10,13 +13,45 @@ from PyQt5.QtWidgets import *
 from matplotlib import pyplot as plt
 
 import datetime
+import warnings
 
 import config
+
+from tqdm.auto import tqdm
+
+class EEG:
+    '''
+    add activity state here
+    '''
+    def __init__(self, eeg=None):
+        pass
+    
+    def read_eeg_file(self, filename):
+        self.raw = read_xdf_file(filename=filename)
+        self.raw._data *= 1e6 # fix for different units
+
+    def apply_filter(self, l:float_repr_style=config.l_freq, h:float_repr_style=config.h_freq):
+        if hasattr(self, 'raw'):
+            if self.raw:
+                self.raw = filter_eeg(self.raw, l, h)
+                return
+        warnings.warn("Valid EEG data is not loaded, nothing to filter", Warning)
+
+    
+    def set_params_from_dict(self, intermediate:dict):
+        for key in intermediate.keys():
+            if key not in ['raw', 'filename']:
+                setattr(self, key, intermediate[key])
+            if key == 'raw_info': # pickles and jsons without loaded EEG don't have raw attrubute
+                try:
+                    self.apply_filter(intermediate['raw_info']['info']['highpass'], intermediate['raw_info']['info']['lowpass']) # raw_info can in theory not match raw?
+                except ValueError as e:
+                    print(f"{e} \nskipping filtration")
 
 def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
     if ftype == 'raw':
         window_name ='Select *DF file'
-        ftype_filter = 'EEG (*.edf, *.bdf) ;; All files(*)'
+        ftype_filter = 'EEG (*.edf *.bdf) ;; All files(*)'
     elif ftype == 'pickle':
         window_name ='Select .pickle file'
         ftype_filter = 'preprocessed EEG (*.pickle) ;; All files(*)'
@@ -32,9 +67,13 @@ def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
     
     if filenames:
         filenames = [pathlib.Path(f) for f in filenames]
-        config.settings.setValue('LAST_FILE_LOCATION', filenames[0].parent)
+
     if pathlib.WindowsPath('.') in filenames:                                   # фигня с точкой происходит из-за пустого пути
         return []
+    else:
+        if len(filenames)>0:
+            config.settings.setValue('LAST_FILE_LOCATION', filenames[0].parent) # update last file location if filename not empty
+    
     if multiple_files:
         return filenames
     else:
@@ -42,48 +81,58 @@ def open_file_dialog(ftype:str='raw', multiple_files:bool=False):
 
 def check_filename_exists(filename):
     if filename:
-        if filename.exists():
+        if filename.is_file():
             return True
-        else:
-            return
+    return
+
+def open_intermediate_file(filename):
+   
+    if filename.suffix == '.h5':
+        raise NotImplementedError
+    elif filename.suffix == '.pickle':
+        warnings.warn("pickles are being deprecated", Warning)
+        open_file = pickle.load
     else:
         return
+    with open(filename, 'rb') as f:
+        intermediate = open_file(f)
+    
+    return intermediate
 
-def open_data_file(filename):
+def open_data_file(filename:pathlib.Path):
+    # refactor
+    if not filename:
+        return None
     if not check_filename_exists(filename):
+        print(f'filename {filename} doesn\'t exist')
         return None
 
-    if filename.suffix == '.pickle':
-        with open(filename, 'rb') as f:
-            intermediate = pickle.load(f)
-            eeg_file_path = pathlib.Path(intermediate['filename'])
-            if not check_filename_exists(eeg_file_path):
-                buttonReply = QMessageBox.question(None, "No valid EEG for this annotation", f"No file at {eeg_file_path}\nSelect another xdf file?")
-                if buttonReply == QMessageBox.Yes:
-                    data = open_data_file(open_file_dialog('raw'))
-                    if data:
-                        data = data['data']
-                    else:
-                        return None
-                else:
-                    return None
+    if filename.suffix in ['.json', '.pickle']:
+        intermediate = open_intermediate_file(filename)
+        eeg_file_path = pathlib.Path(intermediate['filename'])
+        if not check_filename_exists(eeg_file_path):
+            buttonReply = QMessageBox.question(None, "No valid EEG for this annotation", f"No file at {eeg_file_path}\nSelect another xdf file?")
+            if buttonReply == QMessageBox.Yes:
+                eeg = open_data_file(open_file_dialog('raw'))
             else:
-                data = read_xdf_file(eeg_file_path)
+                return None
+        else:
+            eeg = open_data_file(eeg_file_path)
 
-            eeg = {'data':data,
-                'filename':str(filename)}
-            eeg['data'].annotation_dict = intermediate['annotation_dict']
+        if eeg:
+            eeg.set_params_from_dict(intermediate)
 
     elif filename.suffix == '.bdf' or filename.suffix == '.edf':
-        eeg = {'data': read_xdf_file(filename),
-                'filename':str(filename)}
+        eeg = EEG()
+        eeg.read_eeg_file(filename)
+        eeg.filename = str(filename)
     else:
         QMessageBox.about(None, "No valid EEG", f"No vaild EEG file at {filename}\nYou can load .pickle or .xdf file")
         return None
     return eeg
 
 def write_csv_line(file_object, line):
-    file_object.write(';'.join([str(a).replace('.',config.decimal_separator) for a in line]) + '\n')
+    file_object.write(config.csv_sep.join([str(a).replace('.',config.decimal_separator) for a in line]) + '\n')
 
 def read_xdf_file(filename:pathlib.Path=None):
     if filename.suffix == '.bdf':
@@ -92,90 +141,94 @@ def read_xdf_file(filename:pathlib.Path=None):
         raw = mne.io.read_raw_edf(filename, preload=True)
     return raw
 
-def filter_eeg(eeg:mne.io.RawArray):
+def filter_eeg(eeg:mne.io.RawArray, l=config.l_freq, h=config.h_freq, n=config.notch_freq):
     if eeg is not None:
-        eeg = eeg.filter(config.l_freq, config.h_freq, verbose=0)
+        eeg = eeg.notch_filter(np.arange(n, eeg.info['sfreq']/2, n), verbose=0) 
+        eeg = eeg.filter(l, h, verbose=0) 
     return eeg
 
-def welch_spectrum(swd_data:dict, swd_state:dict, fs:float=250, 
+def welch_spectrum(container, 
     nperseg_sec:int=config.nperseg_sec, noverlap:int=config.noverlap_fraction, 
-    max_freq:float=config.max_freq, normalize:bool=config.normalize):
+    fmax:float=config.fmax, fmin:float=0): #SWDTabContainer
+    # noverlap_samples = int(nperseg_samples*config.noverlap_fraction)
+    
+    if not sum(container.swd_state.values()):
+        return
+    else:
+        container.welch = {}
+    
+    nperseg_samples = int(nperseg_sec*container.raw_info['info']['sfreq'])
+    freqs = np.arange(nperseg_samples // 2 + 1, dtype=float) * (container.raw_info['info']['sfreq'] / nperseg_samples)
+    freq_mask = (freqs >= fmin) & (freqs <= fmax)
 
-    nperseg_samples = int(nperseg_sec*fs)
-    noverlap_samples = int(nperseg_samples*noverlap)
-    x = None
-    welch_total = {}
-    spectrum_id_total = {}
-    rejected_swd = {}
-    for n, swd_file in enumerate(swd_data):
-        if sum(swd_state[swd_file]):
-            welch_single_file = []
-            spectrum_id_single_file = []
-            rejected_swd_single_file = []
-            # active_swd = [a for a, b in zip(swds[swd_file], swd_state[swd_file]) if b]
-            for swd_id, swd in enumerate(swd_data[swd_file]['data']):
-                if swd_state[swd_file][swd_id]:
-                    if len(swd) < nperseg_samples:
-                        print (f'dropped swd #{swd_id}: length {len(swd)} samples is less than welch length {nperseg_samples}')
-                        swd_state[swd_file][swd_id] = False
-                        rejected_swd_single_file.append(swd_id)
-                    else:
-                        w = signal.welch(swd, fs=fs, 
-                            nperseg=nperseg_samples, noverlap=noverlap, detrend=False)
-                        x = w[0]
-                        w = w[1]
-                        
-                        welch_single_file.append(w)
-                        spectrum_id_single_file.append(swd_id)
-                else:
-                    print (f'swd #{swd_id} excluded')
 
-            cutoff = sum(x <= max_freq)
-            welch_single_file = np.array(welch_single_file)
-            welch_single_file = welch_single_file[:,:cutoff]
-            x = x[:cutoff]
-            # welch_single_file = np.average(welch_single_file, axis=0).ravel()
-            if normalize:
-                welch_single_file/=np.max(welch_single_file)
-            welch_total[swd_file] = welch_single_file
+    for swd_uuid in container.swd_data.keys():
+        # if container.swd_state[swd_uuid]:
+        if len(container.swd_data[swd_uuid]) < nperseg_samples:
+            # print (f'dropped swd #{swd_uuid}: length {len(container.swd_data[swd_uuid])} samples is less than welch length {nperseg_samples}')
+            container.swd_state[swd_uuid] = False
+        else:
+            pass
             
-            spectrum_id_total[swd_file] = spectrum_id_single_file
-            rejected_swd[swd_file] = rejected_swd_single_file
+            w = signal.welch(container.swd_data[swd_uuid], fs=container.raw_info['info']['sfreq'], 
+                nperseg=nperseg_samples, noverlap=config.noverlap_fraction, detrend=False, 
+                average='median')
+            container.spectrum_x = w[0][freq_mask]
+            container.welch[swd_uuid] = w[1][freq_mask]
 
-    return {'x':x, 'spectrums':welch_total, 'spectrum_id':spectrum_id_total, 'rejected_swd':rejected_swd}
 
-def asymmetry(swd_data:dict, swd_state:dict, peak_prominence_percentage_from_minmax:float = config.peak_prominence_percentage_from_minmax):
-    asymmetry_total = {}
-    envelope_id_total = {}
-    rejected_swd = {}
-    for n, swd_file in enumerate(swd_data):
-        if sum(swd_state[swd_file]):
-            envelope_single_file = []
-            envelope_id_single_file = []
-            rejected_swd_single_file = []
-            for swd_id, swd in enumerate(swd_data[swd_file]['data']):
-                swd = np.array(swd)
-                length = len(swd)/swd_data[swd_file]['sfreq']
-                
-                minmax = np.max(swd) - np.min(swd)
-                peaks_upper = signal.find_peaks(swd, prominence = minmax*config.peak_prominence_percentage_from_minmax )[0]
-                peaks_lower = signal.find_peaks(swd*-1, prominence = minmax*config.peak_prominence_percentage_from_minmax )[0]
-                
-                minmax_mean_peaks = np.mean(swd[peaks_upper]) - np.mean(swd[peaks_lower])
+def check_spectrum_x_equal(channels_containers):
+    x_ = [a.spectrum_x for a in  channels_containers.values()]
+    try:
+        for i in range(len(x_)):
+            decimal = int(np.ceil(np.abs(np.log10(np.average(np.diff(x_[0])))))) # ?????? 
+            np.testing.assert_array_almost_equal(x_[0], x_[i], decimal=decimal)
+    except AssertionError as e:
+        print (e)
+        return
+    return True
 
-                swd_u = interpolate.interp1d(peaks_upper, swd[peaks_upper], kind='cubic')(np.arange(peaks_upper[0],peaks_upper[-1]))
-                swd_d = interpolate.interp1d(peaks_lower,  swd[peaks_lower], kind='cubic')(np.arange(peaks_lower[0],peaks_lower[-1]))
-                
-                # minmax_mean_spline = np.mean(swd_u)-np.mean(swd_d)
-                
-                u = integrate.trapz(swd_u)
-                d = integrate.trapz(swd_d*-1)
 
-                assym_integrated = np.abs(u/d)
-                minmax_integrated = np.abs(u-d)
+def average_spectrum(channels_containers, method=np.average):
+    if not check_spectrum_x_equal(channels_containers):
+        return
+    w = filter_data_by_state(channels_containers)
+    
+    w = {k:method(w[k], axis=0) for k in w}
+    return w
 
-                assym_peaks = np.abs(np.mean(swd[peaks_lower]) / minmax_mean_peaks)*100
-                envelope_single_file.append({
+def calculate_asymmetry(container, peak_prominence_percentage_from_minmax:float = config.peak_prominence_percentage_from_minmax):
+    if not sum(container.swd_state.values()):
+        return
+    else:
+        container.asymmetry = {}
+    for swd_uuid in container.swd_data.keys():
+        # if container.swd_state[swd_uuid]:
+        swd = container.swd_data[swd_uuid]
+        if not len(swd):
+            container.asymmetry[swd_uuid] = None
+            continue
+        length = len(swd)/container.raw_info['info']['sfreq']
+        minmax = np.max(swd) - np.min(swd)
+        peaks_upper = signal.find_peaks(swd, prominence = minmax*config.peak_prominence_percentage_from_minmax )[0]
+        peaks_lower = signal.find_peaks(swd*-1, prominence = minmax*config.peak_prominence_percentage_from_minmax )[0]
+            
+        minmax_mean_peaks = np.mean(swd[peaks_upper]) - np.mean(swd[peaks_lower])
+        try:
+            swd_u = interpolate.interp1d(peaks_upper, swd[peaks_upper], kind='cubic')(np.arange(peaks_upper[0],peaks_upper[-1]))
+            swd_d = interpolate.interp1d(peaks_lower,  swd[peaks_lower], kind='cubic')(np.arange(peaks_lower[0],peaks_lower[-1]))
+
+            # minmax_mean_spline = np.mean(swd_u)-np.mean(swd_d)
+            
+            u = integrate.trapz(swd_u)
+            d = integrate.trapz(swd_d*-1)
+
+            assym_integrated = np.abs(u/d)
+            minmax_integrated = np.abs(u-d)
+
+            assym_peaks = np.abs(np.mean(swd[peaks_lower]) / minmax_mean_peaks)*100
+            container.asymmetry[swd_uuid] = {
+                    'uuid':swd_uuid,
                     'peaks_lower':peaks_lower,
                     'peaks_upper':peaks_upper,
                     
@@ -191,45 +244,105 @@ def asymmetry(swd_data:dict, swd_state:dict, peak_prominence_percentage_from_min
                     'minmax_mean_peaks':minmax_mean_peaks,
                     'minmax_spline':minmax_integrated,
                     'length':length
-                    })
+                    }
+        except ValueError:
+            print(f'Unable to calculate envelope for swd {swd_uuid}')
+            container.asymmetry[swd_uuid] = None
+        
+    # print(container.asymmetry)
 
-                envelope_id_single_file.append(swd_id)
 
-            envelope_id_total[swd_file] = envelope_id_single_file
-            rejected_swd[swd_file] = rejected_swd_single_file
-            asymmetry_total[swd_file] = envelope_single_file
-    return {'asymmetry':asymmetry_total}
+def filter_data_by_state(tabs, data_type:str='spectrums') -> dict: 
+    
+    active_data = {} # filter spectrums by swd_selector checkboxes
+    for uuid in tabs:
+        tab = tabs[uuid]
+        if data_type == 'spectrums':
+            data = tab.welch
+        elif data_type == 'swd':
+            data = tab.swd_data
+        else:
+            raise NotImplementedError
 
-def plot_conditions(data:dict, swd_names:dict, swd_state:dict, canvas, plot_quantiles):
+        if data:
+            active_tab = [v for k, v in data.items() if tab.swd_state[k]]
+
+            active_tab = np.array(active_tab)
+            if active_tab.size >0:
+                active_data[uuid] = active_tab
+    return active_data
+
+
+
+def plot_conditions(tabs, canvas, 
+                    plot_spread=False, plot_avg=False, 
+                    plot_significance=False, stats_container = {}, nhst_test=False,
+                    method=np.median):
     canvas.axes.clear()
-    x = data['x']
-    if 'significance' in list(data.keys()):
-        for a in data['significance']:
-            canvas.axes.axvline(x[a], color='grey', alpha=0.5)
-    for label in data['spectrums'].keys():
-        sample = data['spectrums'][label]
-        mask = [swd_state[label][i] for i in data['spectrum_id'][label]]
-        sample = sample[mask,:]
-        if sample.shape[0]:
-            avg = np.median(sample, axis=0)
-            canvas.axes.plot(x, avg, label=swd_names[label])
-            if plot_quantiles:
-                upper = np.quantile(sample, 0.75, axis=0)
-                lower = np.quantile(sample, 0.25, axis=0)
-                canvas.axes.fill_between(x, avg-lower, avg+upper, alpha=0.2)
+    active_spectrums = filter_data_by_state(tabs) # filter spectrums byswd_selector checkboxes
+    for uuid in tabs:
+        tab = tabs[uuid]
+        active_spectrums_tab = [v for k, v in tab.welch.items() if tab.swd_state[k]]
+        active_spectrums_tab = np.array(active_spectrums_tab)
+        if active_spectrums_tab.size >0:
+            active_spectrums[uuid] = active_spectrums_tab
+    avgs = []
+    for uuid in active_spectrums:
+    # for label in data['spectrums'].keys():
+        sample = active_spectrums[uuid]
+        x = tabs[uuid].spectrum_x
+    # #     mask = [swd_state[label][i] for i in data['spectrum_id'][label]]
+    # #     sample = sample[mask,:]
+    # #     if sample.shape[0]:
+        avg = method(sample, axis=0)
+        avgs.append(avg)
+        canvas.axes.plot(x, avg, label=tabs[uuid].dataset_name)
+        if plot_spread:
+            #TODO: different metrics of spread
+            upper = np.quantile(sample, 0.75, axis=0)
+            lower = np.quantile(sample, 0.25, axis=0)
+            # upper = stats.median_abs_deviation(sample, axis=0)/2
+            # lower = stats.median_abs_deviation(sample, axis=0)/2
+
+            canvas.axes.fill_between(x, avg-lower, avg+upper, alpha=0.2)
+    if len(active_spectrums):
+        if plot_avg:
+            canvas.axes.plot(x, method(np.array(avgs), axis=0), color='black', linewidth=3,
+                                label=method.__name__)
+        if plot_significance and nhst_test:
+            for a in stats_container[nhst_test][0]:
+                canvas.axes.axvline(x[a], color='grey', alpha=0.5)
+    
     canvas.axes.legend(bbox_to_anchor=(0.5, 1), fontsize='xx-small')
     canvas.draw()
     canvas.flush_events()
 
-def statistics_nonparametric(data:dict, swd_state:dict, correction:bool=True):
-    if len(list(data['spectrums'].keys())) < 2:
-        return [], []
+
+def statistics_kw(container, correction:bool=True):
+    fd = filter_data_by_state(container)
+    fd = list(fd.values())
     
-    data_subset = {}
-    for swd_filepath_key in swd_state.keys():
-        mask = [True if swd_state[swd_filepath_key][a] else False for a in data['spectrum_id'][swd_filepath_key] ]
-        data_subset[swd_filepath_key] = data['spectrums'][swd_filepath_key][mask]
-    data_list = [condition for condition in data_subset.values()]
+    kw = [stats.kruskal(*[b[:,a] for b in fd]) for a in range(fd[0].shape[-1])]
+
+    p = np.array([a[1] for a in kw])
+    
+    if correction:
+        p*=fd[0].shape[-1]
+    significant_values = (np.where(p<0.05))[0]
+    if not significant_values.shape[0]:
+        print ('no signifncant values found')
+    return significant_values, kw
+
+def statistics_mw(container, correction:bool=True):
+
+    fd = filter_data_by_state(container)
+    # data_subset = {}
+    # for swd_filepath_key in swd_state.keys():
+    #     mask = [True if swd_state[swd_filepath_key][a] else False for a in data['spectrum_id'][swd_filepath_key] ]
+    #     data_subset[swd_filepath_key] = data['spectrums'][swd_filepath_key][mask]
+    data_list = [condition for condition in fd.values()]
+    if len (data_list) <2:
+        return [[],[]]
 
     mw = [stats.ttest_ind(data_list[0][:,a], data_list[1][:,a]) for a in range(data_list[0].shape[1])] # only 2!!!
     p = np.array([a[1] for a in mw])
@@ -242,6 +355,16 @@ def statistics_nonparametric(data:dict, swd_state:dict, correction:bool=True):
     return significant_values, mw
 
 def timesrting_from_sample(sample_time, sfreq, level=None):
+    """Create formatted string for EEG graph xticks with different zoom level
+
+    Args:
+        sample_time (_type_): sample number 
+        sfreq (_type_): sampling frequency (Hz)
+        level (_type_, optional): zoom level. Defaults to None.
+
+    Returns:
+        _type_: _description_
+    """    
     if level == 'ms':
         ts = datetime.datetime.utcfromtimestamp(sample_time/sfreq).strftime("%H:%M:%S.%f")[:-3]
     elif level == 's':

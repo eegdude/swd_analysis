@@ -8,173 +8,306 @@ import matplotlib
 matplotlib.use('Qt5Agg')
 
 import numpy as np
-from scipy import signal
 
 import pathlib
 import sys
-import csv
-import pickle
-import uuid
+import collections
 import json
+import uuid
 
 import func
+import swd_io
+import containers
 from eeg_widgets import *
 import config
 
 import logging
 
+from tqdm.auto import tqdm
+
 pg.setConfigOptions(enableExperimental=config.enablePyQTGraphExperimental)
 
-class ExportSwdDialog(QDialog):
-    def __init__(self, parent):
-        super(ExportSwdDialog, self).__init__()
-        self.setWindowTitle("Select channels to export")
-        self.layout = QVBoxLayout()
-        self.setLayout(self.layout)
+class SWDChannelBox(QWidget):
+    """Pop-up allowing for selection of channels containing SWDs to be loaded 
+        for further processing
+
+    Args:
+        filename (pathlib.Path): window title
+        swd_file (dict): nested dictionary containing ['swd_data'] keys for 
+            every data channel
+    """
+    def __init__(self, filename:pathlib.Path, swd_file:dict):
+        super(QWidget, self).__init__()
+        self.box_name = filename
+        layout = QVBoxLayout()
+        self.channel_selectors = {}
+
+        self.setLayout(layout)
+        self.gb = QGroupBox(str(self.box_name))
+        self.gb.setCheckable(True)
+        self.gb.setChecked(True)
+        vbox = QVBoxLayout()
+        self.gb.setLayout(vbox)
         
-        labels = {a:f"{a} ({len(parent.eeg['data'].annotation_dict[a])} SWDs)" for a in parent.eeg['data'].info['ch_names']}
-        self.channel_selectors={a:QCheckBox(labels[a]) for a in labels}
-        [self.layout.addWidget(self.channel_selectors[a]) for a in self.channel_selectors]
+        for a in swd_file["swd_data"].keys():
+            n_swd = len(swd_file['swd_data'][a])
+            if n_swd:
+                label = f"channel {a}: {n_swd} SWDs"
+
+                if 'swd_state' in swd_file.keys():
+                    n_active = sum(swd_file['swd_state'][a].values())
+                    label = f"{label}, {n_active} selected"
+                if 'welch' in swd_file.keys():
+                    n_welch = len(swd_file['welch'][a])
+                    label = f"{label}, {n_welch} valid spectrums"
+                else:
+                    label = f"{label}, no spectrums"
+
+                self.channel_selectors[a] = QCheckBox(label)
+        
+        [a.setChecked(True) for a in self.channel_selectors.values()]
+        [vbox.addWidget(self.channel_selectors[a]) for a in self.channel_selectors]
+        layout.addWidget(self.gb)
+
+
+class IOSwdDialog(QDialog):
+    """Dialog to select channels for to export marked SWDs
+    """
+    def __init__(self, data:list, io_type:str='load'):
+        super(IOSwdDialog, self).__init__()
+        self.swd_channels = {}
+        self.setWindowTitle(f"Select channels to {io_type}")
+
+        scroll = QScrollArea(widgetResizable=True) 
+        layout_scroll = QVBoxLayout()
+        layout_scroll.addWidget(scroll)
+        self.setLayout(layout_scroll)
+
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content_widget = QWidget(scroll)
+        layout = QGridLayout(content_widget)
+        content_widget.setLayout(layout)
+        scroll.setWidget(content_widget) # CRITICAL
+
+        test_pickle = ["swd_data" in list(f.keys()) for f in list(data.values())]
+        if sum(test_pickle) < len(test_pickle):
+            message = "Incompliant pickle file at\n" + \
+                '\n\n'.join([str(filename) for valid, filename in zip(test_pickle, data.keys()) if valid])
+            QMessageBox.about(self, "", message)
+            return
+
+        self.boxes = [SWDChannelBox(filename, swd_file) for filename, swd_file in data.items()]
+        [layout.addWidget(b) for b in self.boxes]
+        # [b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed) for b in self.boxes]
 
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
 
         self.buttonBox.accepted.connect(self.export)
         self.buttonBox.rejected.connect(self.cancel)
         
-        self.layout.addWidget(self.buttonBox)
-        
-        self.ch_list = []
+        layout.addWidget(self.buttonBox)
 
+        self.resize(600, 800)
+        
     def export(self):
-        self.ch_list = ([a for a in self.channel_selectors if self.channel_selectors[a].isChecked()])
+        self.swd_channels = {box.box_name:
+                [ch_name for ch_name in box.channel_selectors
+                    if box.channel_selectors[ch_name].isChecked()]
+            for box in self.boxes if box.gb.isChecked()} 
         self.accept()
 
     def cancel(self):
-        self.ch_list = None
+        self.swd_channels = None
         self.reject()
+
 
 class SWDWindow(QMainWindow):
     def __init__(self, parent, filenames:list=None):
         super(SWDWindow, self).__init__()
         self.setWindowTitle("Spectral analysis")
         self.setWindowModality(Qt.ApplicationModal)
-
-        self.swd_selectors = {}
-        self.swd_data = {}
-        self.swd_state = {}
-        self.graphics_layouts = {}
-        self.swd_plots = {}
-        self.spectrum_plots = {}
-        self.swd_names = {}
-        self.stats = {}
+        self.tabs_container = {}
+        self.stats_container = {}
 
         self.block_reanalysis = False
-        
-        self.plot_quantiles = True
+
+        self.plot_spread = True
+        self.plot_avg = True
+        self.plot_significance = True
+
         self.plot_envelopes = True
         self.plot_peaks = False
-        
-        if not filenames:
-            self.filenames = func.open_file_dialog(ftype='csv', multiple_files=True)
-        else:
-            self.filenames = filenames
 
-    def runnnn(self):
+        self.n_cols=2
+        self.filenames = filenames
+
+        self.run_stat_tests = False
+
+
+    def spawn_window(self):
         if not self.filenames:
+            self.filenames = func.open_file_dialog(ftype='pickle', multiple_files=True)
+            if not self.filenames:
+                self.close()
+                return
+
+        self.create_gui()
+        if not self.load_files():
             self.close()
             return
-        self.create_gui()
-        self.load_files()
-        self.create_analysis()
+
+        self.add_swd_tabs()
+        if not self.create_analysis():
+            self.close()
+            return
         self.show()
 
+    def select_swd_channels(self, data):
+        channel_selector = IOSwdDialog(data=data, io_type='load')
+        channel_selector.setModal(True)
+        channel_selector.exec_()
+        # channel_selector.buttonBox.accepted.emit()
+        return channel_selector.swd_channels
+
     def load_files(self):
-        for swd_filepath_key in self.filenames:
-            self.swd_names[swd_filepath_key] = swd_filepath_key.name
-            self.swd_plots[swd_filepath_key] = {}
-            self.spectrum_plots[swd_filepath_key] = {}
-            self.swd_data[swd_filepath_key] = self.load_swd_from_csv(swd_filepath_key)
-            self.swd_state[swd_filepath_key] = [True for a in range(len(self.swd_data[swd_filepath_key]['data']))]
-    
+        self.preprocessed_data = swd_io.open_multiple_swd_pickles(self.filenames)
+        selected_channels = self.select_swd_channels(self.preprocessed_data)
+        if not selected_channels:
+            if not self.tabs_container:
+                return
+            return
+        channels_containers = swd_io.create_swd_containers_for_individual_channels(self.preprocessed_data, selected_channels)
+        for tab_name, SwdTabData in channels_containers.items():
+            self.tabs_container[SwdTabData.uuid] = SwdTabData
+            self.tabs_container[SwdTabData.uuid].tab_name = tab_name
+        return True
+
+    def add_swd_tabs(self):
+        for tab_name, container in tqdm(list(self.tabs_container.items())):
+            self.add_swd_tab(container, container.dataset_name) #get this out of function
+
+    def save_containers(self):
+        payload = swd_io.containers_to_dict(self.preprocessed_data, self.tabs_container)
+        swd_io.update_eeg_processing(payload)
+
     def create_gui(self):
         self.ep = QShortcut(QKeySequence('Ctrl+='), self)
-        self.ep.activated.connect(self.expand_plots)
+        self.ep.activated.connect(lambda: self.resize_plots(1.1))
         self.sp = QShortcut(QKeySequence('Ctrl+-'), self)
-        self.sp.activated.connect(self.shrink_plots)
+        self.sp.activated.connect(lambda: self.resize_plots(0.9))
 
         self.create_menu()
         self.splitter = QSplitter(Qt.Horizontal)
         self.setCentralWidget(self.splitter)
         self.tabs = TabWidget()
+        self.tabs.currentChanged.connect(self.change_tabs)
         self.tabs.setMinimumSize(600, 200)
         self.tabs.resize(600, 200)
-        self.tabs.tbar._editor.editingFinished.connect(lambda: (self.rename_dataset(), self.stats_mw(), self.plot_average_spectrum()))
         self.splitter.addWidget(self.tabs)
-        self.tabs_list = []
-        self.add_plot()
+        self.add_mpl_plot()
+        self.tabs.tbar._editor.editingFinished.connect(lambda: (self.rename_dataset(), self.nhst_stats(), self.plot_average_spectrum()))
+        
+        self.pgPen_y = pg.mkPen(color="y", width=1)
+        self.pgPen_r = pg.mkPen(color="r", width=1)
+        self.pgPen_w = pg.mkPen(color="w", width=1)
+        self.pgPen_g = pg.mkPen(color="g", width=1)
+        self.pgBrush_b = pg.mkBrush(color='b')
 
-    def shrink_plots(self):
-        for fn in self.graphics_layouts.keys():
-            for p in self.graphics_layouts[fn]:
-                newsize = QSize(int(p.size().width()*0.9), int(p.size().height()*0.9))
-                p.setMinimumSize(newsize)
+    def change_tabs(self, ):
+        if len(self.tabs.uuid_index_dict):
+            self.plot_swd_and_spectrums()
 
-    def expand_plots(self):
-        for fn in self.graphics_layouts.keys():
-            for p in self.graphics_layouts[fn]:
-                newsize = QSize(int(p.size().width()*1.1), int(p.size().height()*1.1))
+    def resize_plots(self, multiptier:float=1):
+        for uuid in self.tabs_container:
+            for swd_uuid in self.tabs_container[uuid].annotation_dict.keys():
+                p = self.tabs_container[uuid].graphics_layouts[swd_uuid]
+                newsize = QSize(int(p.size().width()*multiptier), int(p.size().height()*multiptier))
                 p.setMinimumSize(newsize)
-    
+                p.resize(newsize)
+
     def create_analysis(self):
-        self.run_analysis()
+        self.process_data()
         self.plot_swd_and_spectrums()
-        self.stats_mw()
+        self.nhst_stats()
+
         self.plot_average_spectrum()
+
+        return True
+
+    def add_menu_item(self, menu, name='', func=None, shortcut='', checkable=False, checked=False, enabled=True):
+        action = QAction(name, menu, checkable=checkable, checked=checked)
+        action.setShortcut(shortcut)
+        action.triggered.connect(func)
+        action.setEnabled(enabled)
+        menu.addAction(action)
     
     def create_menu(self):
         menubar = self.menuBar()
         menu = menubar.addMenu('File')
-        export_action1 = menu.addAction("Export spectral data")
-        export_action1.triggered.connect(self.export_spectrum)
+        menu2 = menubar.addMenu('Plotting')
+        menu3 = menubar.addMenu('Stats')
 
-        export_action2 = menu.addAction("Export average spectral data")
-        export_action2.triggered.connect(self.export_average_spectrum)
+
+        self.add_menu_item(menu, "Update processing files", self.save_containers)
+
+        self.add_menu_item(menu, "Export spectral data", self.export_spectrum, enabled=False)
+        self.add_menu_item(menu, "Export average spectral data", self.export_average_spectrum, enabled=False)
+
+        self.add_menu_item(menu, "Export per-swd stats", self.export_stats)
+        self.add_menu_item(menu2, "Plot spread", self.plot_spread_func, checkable=True, checked=True)
+        self.add_menu_item(menu2, "Plot significance", self.plot_sig_func, checkable=True, checked=True)
+        self.add_menu_item(menu2, 'Plot envelopes', self.change_plot_additions_swd, checkable=True, checked=True)
+        self.add_menu_item(menu2, 'Plot peaks', self.change_plot_additions_swd, checkable=True, checked=False)
         
-        export_action3 = menu.addAction("Export asymmetry")
-        export_action3.triggered.connect(self.export_asymmetry)
+        self.add_menu_item(menu3, 'Run tests', self.run_stat_tests_switch, checkable=True, checked=self.run_stat_tests)
+        self.add_menu_item(menu3, 'Non-parametric stats', self.stats_type_switch, checkable=True, checked=False)
         
-        menu2 = menubar.addMenu('Analysis')
-        quantile_action = QAction('Plot quantiles', menu2, checkable=True, checked=True)
-        quantile_action.triggered.connect(self.plot_quantiles_func)
-        menu2.addAction(quantile_action)
-
-        envelope_action = QAction('Plot envelopes', menu2, checkable=True, checked=True)
-        envelope_action.triggered.connect(self.plot_envelopes_func)
-        menu2.addAction(envelope_action)
-
-        plot_peaks_action = QAction('Plot peaks', menu2, checkable=True, checked=False)
-        plot_peaks_action.triggered.connect(self.plot_peaks_func)
-        menu2.addAction(plot_peaks_action)
-    
-    def plot_quantiles_func(self):
-        self.plot_quantiles=self.sender().isChecked()
+    def run_stat_tests_switch(self):
+        self.run_stat_tests = self.sender().isChecked()
+        self.nhst_stats()
         self.plot_average_spectrum()
 
-    def plot_envelopes_func(self):
-        self.plot_envelopes=self.sender().isChecked()
-        for swd_filepath_key in self.swd_plots.keys():
-            for swd_id, plot in enumerate(self.swd_plots[swd_filepath_key]):
-                self.draw_swd_plot(swd_filepath_key, swd_id)
+    def stats_type_switch(self):
+        print(self.sender().isChecked())
+        pass
+
+    def plot_spread_func(self):
+        self.plot_spread = self.sender().isChecked()
+        self.plot_average_spectrum()
+
+    def plot_sig_func(self):
+        self.plot_significance = self.sender().isChecked()
+        self.plot_average_spectrum()
     
-    def plot_peaks_func(self):
-        self.plot_peaks=self.sender().isChecked()
-        for swd_filepath_key in self.swd_plots.keys():
-            for swd_id, plot in enumerate(self.swd_plots[swd_filepath_key]):
-                self.draw_swd_plot(swd_filepath_key, swd_id)
+    def plot_med_func(self):
+        self.plot_avg = self.sender().isChecked()
+        self.plot_average_spectrum()
+
+    def change_plot_additions_swd(self, peaks=None, envelopes=None):
+        """additional features applied to each SWD plot
+
+        Args:
+            peaks (bool, optional): _description_. Defaults to False.
+            envelopes (bool, optional): _description_. Defaults to False.
+        """
+        sender = self.sender()
+        if sender.text() == 'Plot envelopes':
+            self.plot_envelopes = sender.isChecked()
+        elif sender.text() == 'Plot peaks':
+            self.plot_peaks = sender.isChecked()
+        else:
+            print(f'Plot action for {sender.text()} is not implemented')
+
+        for tab_uuid in self.tabs_container:
+            self.tabs_container[tab_uuid].updated['swd'] = True
+        self.plot_swd_and_spectrums()
+            
 
     def export_spectrum(self):
         '''
-        export all valid spectrums
+        export all valid spectrums to csv file
         '''
         dir = QFileDialog.getExistingDirectory(self, "Select Directory")
         if not dir:
@@ -189,50 +322,19 @@ class SWDWindow(QMainWindow):
                     for line in data.T:
                         func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
 
-    def export_asymmetry(self):
-        dir = QFileDialog.getExistingDirectory(self, "Select Directory")
-        if not dir:
+    def export_stats(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory")
+        if not directory:
             return
         else:
-            dir = pathlib.Path(dir)
-        if self.asymmetry:
-            recepit = {}
-            for swd_filepath_key in self.asymmetry['asymmetry'].keys():
-                file_assym = self.asymmetry['asymmetry'][swd_filepath_key]
-
-                mask = [True if self.swd_state[swd_filepath_key][swd_id] else False for swd_id, _ in enumerate(file_assym)]
-                recepit[self.swd_names[swd_filepath_key]] = [swd_id if self.swd_state[swd_filepath_key][swd_id] else False for swd_id, _ in enumerate(file_assym)]
-
-
-                assym_peaks = [file_assym[swd_id]['assym_peaks'] for swd_id, _ in enumerate(file_assym)]
-                spline_lower_integtal = [file_assym[swd_id]['spline_lower_integtal'] for swd_id, _ in enumerate(file_assym)]
-                spline_upper_integtal = [file_assym[swd_id]['spline_upper_integtal'] for swd_id, _ in enumerate(file_assym)]
-                minmax = [file_assym[swd_id]['minmax'] for swd_id, _ in enumerate(file_assym)]
-                minmax_mean_peaks = [file_assym[swd_id]['minmax_mean_peaks'] for swd_id, _ in enumerate(file_assym)]
-                minmax_spline = [file_assym[swd_id]['minmax_spline'] for swd_id, _ in enumerate(file_assym)]
-                length = [file_assym[swd_id]['length'] for swd_id, _ in enumerate(file_assym)]
-
-                data = np.array([assym_peaks, spline_lower_integtal, spline_upper_integtal,
-                    minmax, minmax_mean_peaks, minmax_spline,
-                    length])
-                header = ['peaks', 'spline_l', 'spline_u',
-                    'minmax', 'mimax_peaks', 'minmax_spline',
-                    'length']
-
-                data = data[:,mask]
-
-                csv_path = dir / f'{self.swd_names[swd_filepath_key]}.asymmetry.csv'
-                recepit_path = csv_path.parent / (csv_path.stem+'_asymmetry_log.json')
-                
-                with open(recepit_path, 'w') as json_file:
-                    json.dump(recepit, json_file, indent=4)
-                
-                with open(csv_path, 'w') as f:
-                    func.write_csv_line(file_object=f, line=header)
-                    for line in data.T:
-                        func.write_csv_line(file_object=f, line=line) # Excel dialect is not locale-aware :-(
+            directory = pathlib.Path(directory)
+        for container in self.tabs_container.values():
+            swd_io.export_stats(container, directory)
 
     def export_average_spectrum(self):
+        ##
+        ##
+
         filepath = QFileDialog.getSaveFileName(self, "Save average spectrum", filter="Comma-separated values (*.average_spectrum.csv)")
         if not filepath[0]:
             return
@@ -261,71 +363,76 @@ class SWDWindow(QMainWindow):
                     func.write_csv_line(file_object=f, line=[line[0]] + list(line[1]))
 
     def rename_dataset(self):
-        old_text, new_text = self.tabs.tbar.old_text, self.tabs.tbar.new_text
-        swd_filepath_key = [key for key, value in self.swd_names.items() if value == old_text][0]
-        self.swd_names[swd_filepath_key] = new_text
+        new_text = self.tabs.tbar.new_text
+        self.tabs_container[self.tabs.tbar.tabData(self.tabs.tbar.currentIndex())].dataset_name = new_text
 
-    def load_swd_from_csv(self, fn):
-        with open(fn, 'r') as f:
-            reader = csv.reader(f, delimiter=';')
-            rows = [r for r in reader]
-            sfreq = int(float(rows[0][0]))
-            swd_array = []
-            for row in rows[1:]:
-                swd = [float(a.replace(',', '.')) for a in row]
-                if config.invert_SWD:
-                    swd = [a*-1 for a in swd]
-                
-                swd_array.append(swd)
-        self.add_swd_tab(swd_array, sfreq, fn) #get this out of function
-        return {'sfreq':sfreq, 'data':swd_array}
-
-    def tab_menu(self, fn, event):
+    def tab_menu(self, tab_uuid, event):
         menu = QMenu()
-        toggleAct = menu.addAction("Toggle")
+        toggleMenuAct = menu.addAction("Toggle")
         action = menu.exec_(self.mapToGlobal(event))
-        if action == toggleAct:
+        if action == toggleMenuAct:
             self.block_reanalysis = True
-            [cb.setChecked(not cb.isChecked()) for cb in self.swd_selectors[fn]]
+
+            [cb.setChecked(not cb.isChecked()) for cb in self.tabs_container[tab_uuid].swd_selectors.values()]
+            self.tabs_container[tab_uuid].updated['swd'] = True
             self.block_reanalysis = False
 
-            self.stats_mw()
+            self.nhst_stats()
             self.plot_average_spectrum()
             self.plot_swd_and_spectrums()
             
-    def add_swd_tab(self, swd_array, sfreq, fn):
+    def create_swd_tab(self, swd_container:containers.SWDTabContainer, tab_name:str):
+        
+        swd_container.plots = {}
+        swd_container.swd_selectors = {uuid:QCheckBox(str(n)) for n, uuid in enumerate(swd_container.swd_state.keys())}
+        for swd_uuid, checkbox in swd_container.swd_selectors.items():
+            checkbox.swd_uuid = swd_uuid
+
         tab = MyScrollArea()
         tab.setWidgetResizable(True)
         tab.setContextMenuPolicy(Qt.CustomContextMenu)
-        tab.customContextMenuRequested.connect(lambda x: self.tab_menu(fn, x))
-
-        self.tabs_list.append(tab)
-        self.tabs.addTab(tab, f"{self.swd_names[fn]}")
+        tab.customContextMenuRequested.connect(lambda x: self.tab_menu(swd_container.uuid, x))
         
+        tab_index = self.tabs.addTab(tab, f"{tab_name}")
+        self.tabs.tbar.setTabData(tab_index, swd_container.uuid)
+        self.tabs.uuid_index_dict[tab_index] = swd_container.uuid
+        return tab_index
+        
+    def add_content_to_tab(self, tab_container:containers.SWDTabContainer, tab_index:int):
+        tab = self.tabs.widget(tab_index)
         content_widget = QWidget()
         layout = QGridLayout(content_widget)
-
-        self.swd_selectors[fn]=[QCheckBox(str(a)) for a in range(len(swd_array))]
         # [a.setSizePolicy( QSizePolicy.Fixed, QSizePolicy.Expanding) for a in self.swd_selectors[fn]]
-        
-        [layout.addWidget(a) for a in self.swd_selectors[fn]]
-        [sc.setChecked(True) for sc in self.swd_selectors[fn]]
-        [a.toggled.connect(lambda:self.toggleAct(fn)) for a in self.swd_selectors[fn]]
-
-        self.graphics_layouts[fn] = [MyGraphicsLayoutWidget() for a in range(len(swd_array))]
-        
-        for swd_id, swd in enumerate(swd_array):
-            layout.addWidget(self.graphics_layouts[fn][swd_id], swd_id, 1)
-            p = self.graphics_layouts[fn][swd_id].addPlot(row=0, col=0)
-            p.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self.swd_plots[fn][swd_id] = p
-            
-            p2 = self.graphics_layouts[fn][swd_id].addPlot(row=0, col=1)
-            self.spectrum_plots[fn][swd_id] = p2
-
+        [layout.addWidget(a) for a in tab_container.swd_selectors.values()]
+        [sc.setChecked(tab_container.swd_state[swd_uuid]) for swd_uuid, sc in tab_container.swd_selectors.items()]
+        self.add_plots_to_tab(tab_container, layout)
         tab.setWidget(content_widget)
     
-    def add_plot(self):
+    def add_swd_tab(self, swd_container:containers.SWDTabContainer, tab_name:str):
+        i = self.create_swd_tab(swd_container, tab_name)
+        self.add_content_to_tab(swd_container, i)
+        
+    def add_plots_to_tab(self, swd_container, layout, tab_index=None):
+
+        # if swd_container.uuid != self.tabs.uuid_index_dict[self.tabs.tbar.currentIndex()]:
+        #     return
+        swd_container.graphics_layouts = {}
+
+        # n_ = 0
+        for n_, (swd_uuid, a) in enumerate(swd_container.swd_selectors.items()):
+            a.toggled.connect(lambda:self.toggleAct(swd_container.uuid, swd_uuid))
+            swd_container.graphics_layouts[swd_uuid] = MyGraphicsLayoutWidget()
+        # for n_, swd_uuid in enumerate(swd_container.annotation_dict):
+            layout.addWidget(swd_container.graphics_layouts[swd_uuid], n_, 1)
+            
+            for col in range(self.n_cols):
+                p_ =  FastPlotItem(enableMenu=False, skipFiniteCheck=True)
+                swd_container.graphics_layouts[swd_uuid].addItem(p_, row=0, col=col)
+                p_.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            swd_container.plots[swd_uuid] = swd_container.graphics_layouts[swd_uuid]
+            # n_+=1
+    
+    def add_mpl_plot(self):
         plot_widget = QWidget()
         plot_layout = QVBoxLayout()
         self.splitter2 = QSplitter(Qt.Vertical)
@@ -342,272 +449,359 @@ class SWDWindow(QMainWindow):
         self.console = QTextEdit()
         self.splitter2.addWidget(self.console)
 
-    def toggleAct(self, swd_filepath_key):
-        self.toggle_single_swd(swd_filepath_key)
-        self.draw_swd_plot(swd_filepath_key, int(self.sender().text()))
+    def toggleAct(self, tab_uuid, swd_uuid):
+        self.tabs_container[tab_uuid].updated = {'swd':True, 'spectrum':True}
+        swd_uuid = self.sender().swd_uuid
+        self.toggle_single_swd(tab_uuid, swd_uuid) # check lambda
+        self.draw_all_pg_plots(tab_uuid, swd_uuid)
         if not self.block_reanalysis:
-            self.stats_mw()
+            self.nhst_stats()
             self.plot_average_spectrum()
 
-    def run_analysis(self): #runs once
+
+    def process_data(self): #runs once
         if self.block_reanalysis:
             return
         else:
-            self.welch = func.welch_spectrum(self.swd_data, self.swd_state, normalize=False)
-            self.asymmetry = func.asymmetry(self.swd_data, self.swd_state)
-            self.block_reanalysis = True
-            for swd_filepath_key in self.swd_state:
-                for swd_id in self.welch['rejected_swd'][swd_filepath_key]:
-                    self.swd_state[swd_filepath_key][swd_id] = False
-                    self.swd_selectors[swd_filepath_key][swd_id].setChecked(False)
-            self.block_reanalysis = False
+            for uuid in self.tabs_container:
+                func.welch_spectrum(self.tabs_container[uuid])
+                func.calculate_asymmetry(self.tabs_container[uuid])
+            # self.asymmetry = None
+            # self.block_reanalysis = True
+            # for swd_filepath_key in self.swd_state:
+            #     for swd_id in self.welch['rejected_swd'][swd_filepath_key]:
+            #         self.swd_state[swd_filepath_key][swd_id] = False
+            #         self.swd_selectors[swd_filepath_key][swd_id].setChecked(False)
+            # self.block_reanalysis = False
     
-    def stats_mw(self):
-        significant_freqs, mw = func.statistics_nonparametric(self.welch, self.swd_state)
-        self.stats['significance'] = significant_freqs
-        self.stats['mw'] = mw
-    
-    def plot_average_spectrum(self):
-        func.plot_conditions(self.welch, self.swd_names, self.swd_state, self.sc, self.plot_quantiles)
-        console_text = 'Running analysis with:\n' + \
-            ''.join([f'{sum(self.swd_state[swd_filepath_key])} valid spectrums in {self.swd_names[swd_filepath_key]} \n' for swd_filepath_key in self.swd_state.keys()]) + '\n' + \
-            'Frequency\tTest statistic\tp\n'
-        for freq in self.stats['significance']:
-            T = self.stats['mw'][freq][0]
-            p = self.stats['mw'][freq][1]
-
-            console_text += f'{self.welch["x"][freq]:.2g}\t{T:.2g}\t{p:.2g}\n'
-        self.console.setText(console_text)
-
-    def plot_swd_and_spectrums(self):
-        for swd_filepath_key in self.welch['spectrums'].keys():
-            [i.clear() for i in self.spectrum_plots[swd_filepath_key].values()]
-            for swd_id in self.swd_plots[swd_filepath_key].keys():
-                self.draw_swd_plot(swd_filepath_key, swd_id)
-                self.draw_spectrum_plot(swd_filepath_key, swd_id)
-    
-    def draw_spectrum_plot(self, swd_filepath_key, swd_id):
-        if self.spectrum_plots[swd_filepath_key]:
-            try:
-                spectrum_id = self.welch['spectrum_id'][swd_filepath_key].index(swd_id)
-                p2 = self.spectrum_plots[swd_filepath_key][swd_id]
-                spectrum = self.welch['spectrums'][swd_filepath_key][spectrum_id]
-                p2.plot(self.welch['x'], spectrum, pen=pg.mkPen(color='w'))
-            except ValueError:
+    def nhst_stats(self, test = 'mw'):
+        if not self.run_stat_tests:
+            self.nhst_test = None
+            self.stats_container[test] = []
+            fd = func.filter_data_by_state(self.tabs_container)
+            console_text = ''.join([f'{fd[key].shape[0]} valid spectrums in {self.tabs_container[key].dataset_name} \n' for key in fd.keys()])
+            
+        else:
+            if len(list(self.tabs_container.keys())) >2:
+                test='kw'
+            if test == 'mw':
+                result = func.statistics_mw(self.tabs_container)
+            elif test == 'student':
                 pass
+            elif test == 'kw':
+                result = func.statistics_kw(self.tabs_container)
+            
+            self.nhst_test = test
+            
+            self.stats_container[test] = result
 
-    def draw_swd_plot(self, swd_filepath_key, swd_id, x:list=None):
-        plot = self.swd_plots[swd_filepath_key][swd_id]
-        plot.clear()
-        swd = self.swd_data[swd_filepath_key]['data'][swd_id]
-        sfreq = self.swd_data[swd_filepath_key]['sfreq']
-        try:
-            spectrum_id = self.welch['spectrum_id'][swd_filepath_key].index(swd_id)
-            if self.swd_state[swd_filepath_key][swd_id]:
-                color = 'r'
-            else:
-                color = 'w'
-        except ValueError:
-            color = 'w'
+            fd = func.filter_data_by_state(self.tabs_container)
+
+            console_text = f'Running {test} analysis with:\n' + \
+                ''.join([f'{fd[key].shape[0]} valid spectrums in {self.tabs_container[key].dataset_name} \n' for key in fd.keys()]) + '\n' + \
+                'Frequency\tTest statistic\tp\n'
+
+            x = list(self.tabs_container.values())[0].spectrum_x
+            if len(self.stats_container[test][0]) == 0:
+                console_text += f'no signifncant differences found\n'
+
+            for freq in self.stats_container[test][0]:
+                T = self.stats_container[test][1][freq][0]
+                p = self.stats_container[test][1][freq][1]
+
+                console_text += f'{x[freq]:.2g}\t{T:.2g}\t{p:.2g}\n'
+            
+                
+        self.console.setText(console_text)
+        
+
+    def plot_average_spectrum(self):
+        ## all values shoud be precomputed in Analysis object
+        ##
+        func.plot_conditions(self.tabs_container, self.sc, 
+                             self.plot_spread, self.plot_avg, 
+                             self.plot_significance, self.stats_container, self.nhst_test,
+                             method=np.median)
+
+    def plot_swd_and_spectrums(self, ignore_visibility:bool=False):
+        for tab_uuid in self.tabs_container:
+            if not ignore_visibility:
+                if tab_uuid != self.tabs.uuid_index_dict[self.tabs.tbar.currentIndex()]:
+                    continue
+            for n_, swd_uuid in enumerate(tqdm(self.tabs_container[tab_uuid].annotation_dict)):
+                self.draw_all_pg_plots(tab_uuid, swd_uuid)
+            self.tabs_container[tab_uuid].updated = {'swd':False, 'spectrum':False}
+
+    
+    def draw_spectrum_plot(self, tab_uuid, swd_uuid, col:int=1):
+        if not self.tabs_container[tab_uuid].updated['spectrum']:
+            return
+        
+        container = self.tabs_container[tab_uuid]
+        plot = container.plots[swd_uuid].getItem(0, col)
+
+        if self.tabs_container[tab_uuid].swd_state[swd_uuid]:
+            pen=self.pgPen_g
+        else:
+            pen=self.pgPen_w
+        if swd_uuid in container.welch.keys():
+            plot.plot(container.spectrum_x, container.welch[swd_uuid], pen=pen, clear=True)
+            
+
+    def draw_swd_plot(self, tab_uuid, swd_uuid, x:list=None, col:int=0):
+        if not self.tabs_container[tab_uuid].updated['swd']:
+            return
+        
+        plot = self.tabs_container[tab_uuid].plots[swd_uuid].getItem(0, col)
+        swd = self.tabs_container[tab_uuid].swd_data[swd_uuid]
+        sfreq = self.tabs_container[tab_uuid].raw_info['info']['sfreq']
+        
         if not x:
             x = np.arange(len(swd))/sfreq
-        plot.plot(x, swd, pen=pg.mkPen(color=color))
-        if self.asymmetry:
-            peaks_upper = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['peaks_upper']
-            spline_upper = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['spline_upper']
-            peaks_lower = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['peaks_lower']
-            spline_lower = self.asymmetry['asymmetry'][swd_filepath_key][swd_id]['spline_lower']
-
-            if self.plot_envelopes:
-                # print((peaks_upper, len(swd), spline_upper.shape[0]))
-                plot.plot(np.linspace(x[peaks_upper[0]], x[peaks_upper[-1]], spline_upper.shape[0]), spline_upper, pen="FF0")
-                plot.plot(np.linspace(x[peaks_lower[0]], x[peaks_lower[-1]], spline_lower.shape[0]), spline_lower, pen="FF0")
         
-            if self.plot_peaks:
-                plot.plot([x[a] for a in peaks_upper], [swd[a] for a in peaks_upper], pen=None, brush="FF0", symbolSize=6)
-                plot.plot([x[a] for a in peaks_lower], [swd[a] for a in peaks_lower], pen=None, brush="F0F", symbolSize=6)
+        if self.tabs_container[tab_uuid].swd_state[swd_uuid]:
+            pen = self.pgPen_r
+        else:
+            pen = self.pgPen_w
+        plot.plot(x, swd, pen=pen, clear=True)
+
+        if hasattr(self.tabs_container[tab_uuid], "asymmetry"):
+            if self.tabs_container[tab_uuid].asymmetry[swd_uuid]:
+                peaks_upper = self.tabs_container[tab_uuid].asymmetry[swd_uuid]['peaks_upper']
+                peaks_lower = self.tabs_container[tab_uuid].asymmetry[swd_uuid]['peaks_lower']
+                spline_upper = self.tabs_container[tab_uuid].asymmetry[swd_uuid]['spline_upper']
+                spline_lower = self.tabs_container[tab_uuid].asymmetry[swd_uuid]['spline_lower']
+                
+                for peaks, spline in ((peaks_upper, spline_upper), (peaks_lower, spline_lower)):
+                    if self.plot_envelopes:
+                        plot.plot(np.linspace(x[peaks[0]], x[peaks[-1]], spline.shape[0]), spline,
+                        pen=self.pgPen_y)
+                        
+                    if self.plot_peaks:
+                        plot.plot([x[a] for a in peaks], [swd[a] for a in peaks],
+                            pen=None, brush=self.pgBrush_b, symbolSize=6)
+
+    def draw_all_pg_plots(self, tab_uuid:str, swd_uuid:str):
+        self.draw_swd_plot(tab_uuid, swd_uuid)
+        self.draw_spectrum_plot(tab_uuid, swd_uuid)
 
 
-    def toggle_single_swd(self, swd_filepath_key:str, swd_id:int=None):
-        if swd_id is None:
-            swd_id = int(self.sender().text())
-        self.swd_state[swd_filepath_key][swd_id] = self.sender().isChecked()
-        if swd_id not in self.welch['spectrum_id'][swd_filepath_key]:
+    def toggle_single_swd(self, uuid:str, swd_uuid:int=None):
+        self.tabs_container[uuid].swd_state[swd_uuid] = self.sender().isChecked()
+        if swd_uuid not in self.tabs_container[uuid].welch.keys():
             self.sender().setChecked(False)
-    
+
     def keyPressEvent(self, event):
         key = event.key()
         if key == Qt.Key_Control and not event.isAutoRepeat():
-            [a.SetScrollable(False) for a in self.tabs_list]
-            for swd_filepath_key in self.swd_plots.keys():
-                [a.SetScrollable(True) for a in self.graphics_layouts[swd_filepath_key]]
-
+            self.tabs.currentWidget().SetScrollable(False)
+            for uuid in self.tabs_container.keys():
+                [a.SetScrollable(True) for a in self.tabs_container[uuid].graphics_layouts.values()]
     
     def keyReleaseEvent(self, event):
         key = event.key()
         if key == Qt.Key_Control and not event.isAutoRepeat():
-            [a.SetScrollable(True) for a in self.tabs_list]
-            for swd_filepath_key in self.swd_plots.keys():
-                [a.SetScrollable(False) for a in self.graphics_layouts[swd_filepath_key]]
+            self.tabs.currentWidget().SetScrollable(True)
+            for uuid in self.tabs_container.keys():
+                [a.SetScrollable(False) for a in self.tabs_container[uuid].graphics_layouts.values()]
+
 
 class SpectralWindow(SWDWindow):
+    
     def __init__(self, parent, filenames:list=None):
-        super(SpectralWindow, self).__init__(parent, filenames)
-        self.setWindowTitle("Averaged spectral analysis")
-        self.welch = {}
-        self.welch['spectrums'] = {}
-        self.welch['spectrum_id'] = {}
-        self.welch['rejected_swd'] = {}
-        self.asymmetry = {}
+        """_summary_
 
+        Args:
+            parent (_type_): _description_
+            filenames (list, optional): _description_. Defaults to None.
+        Attributes:
+
+        """
+        super(SpectralWindow, self).__init__(parent, filenames)
+        self.setWindowTitle("Average spectral analysis")
+        self.datasets_container = {}
+        self.n_cols = 1
+        self.filenames = filenames
+        self.plot_swd_and_spectrums = self.plot_spectrums # &&&
+        self.run_stat_tests = True
+    
     def create_menu(self):
         menubar = self.menuBar()
         menu = menubar.addMenu('File')
-        export_action = menu.addAction("Export spectral data")
-        export_action.triggered.connect(self.export_spectrum)
-        menu2 = menubar.addMenu('Analysis')
-        quantile_action = QAction('Plot quantiles', menu2, checkable=True, checked=True)
-        quantile_action.triggered.connect(self.plot_quantiles_func)
-        menu2.addAction(quantile_action)
+
+        add_ds_action = menu.addAction("Add dataset")
+        add_ds_action.triggered.connect(self.add_dataset)
+        export_action = menu.addAction("Save analysis")
+        export_action.triggered.connect(self.save_analysis_containers)
+        # export_action.setEnabled(False )
+
+        menu2 = menubar.addMenu('Plotting')
+        menu3 = menubar.addMenu('Stats')
+
+ 
+        
+        self.add_menu_item(menu2, "Plot spread", self.plot_spread_func, checkable=True, checked=True)
+
+        self.add_menu_item(menu2, "Plot significance", self.plot_sig_func, checkable=True, checked=True)
+        self.add_menu_item(menu2, 'Plot median', self.plot_med_func, checkable=True, checked=True)
+        # self.add_menu_item(menu2, 'Plot peaks', self.change_plot_additions_swd, checkable=True, checked=False)
+
+        self.add_menu_item(menu3, 'Run tests', self.run_stat_tests_switch, checkable=True, checked=self.run_stat_tests)
+        self.add_menu_item(menu3, 'Non-parametric stats', self.stats_type_switch, checkable=True, checked=False)
+
+
+    def check_files(self):
+        for uuid in self.tabs_container:
+            if not hasattr(self.tabs_container[uuid], 'welch'):
+                QMessageBox.warning(self, "Filter", f"no precomputed spectral data in\n{self.tabs_container[uuid].filename}")
+                return
+        return True
+
+    def save_analysis_containers(self):
+        for container in self.tabs_container:
+            payload = swd_io.containers_to_dict(self.preprocessed_data, self.tabs_container)
+        swd_io.update_eeg_processing(payload)
+
+    def load_files(self):
+        self.preprocessed_data = swd_io.open_multiple_swd_pickles(self.filenames)
+        selected_channels = self.select_swd_channels(self.preprocessed_data)
+        if not selected_channels:
+            if not self.tabs_container:
+                return
+            return
+        
+        channels_containers = swd_io.create_swd_containers_for_individual_channels(self.preprocessed_data, selected_channels)
+        try:
+            w = func.filter_data_by_state(channels_containers)
+            w = {k:np.average(w[k], axis=0) for k in w}
+        except AttributeError as e:
+            QMessageBox.about(self, "", f"{e}")
+            return
+
+        ds_uuid = str(uuid.uuid4())
+        ds_name = str(len(self.tabs_container))
+
+        data = dict (dataset_uuid = ds_uuid,
+            annotation_dict={k:True for k in w},
+            swd_uuid_list=None,
+            swd_data={k:True for k in w},
+            swd_state={k:True for k in w},
+            raw_info=None,
+            ch_name=None,
+            dataset_name=ds_name,
+            welch=w,
+            spectrum_x=list(channels_containers.values())[0].spectrum_x, # !!!!!!!!!!!!!
+            )
+
+        channels_containers[ds_name] =  containers.SWDTabContainer(ds_name, data)
+        self.tabs_container[channels_containers[ds_name].uuid] = channels_containers[ds_name] 
+        self.tabs_container[channels_containers[ds_name].uuid].tab_name = ds_name
+        return channels_containers[ds_name].uuid
+
+    def add_dataset(self, filenames:list=None):
+        if not filenames:
+            self.filenames = func.open_file_dialog(ftype='pickle', multiple_files=True)
+        else:
+            self.filenames = filenames
+        new_cont_uuid = self.load_files()
+        if not new_cont_uuid:
+            return
+        self.add_swd_tab(self.tabs_container[new_cont_uuid], self.tabs_container[new_cont_uuid].tab_name)
+        self.create_analysis()
 
     def create_analysis(self):
+        if not self.check_files():
+            self.close()
+            return
         self.plot_spectrums()
-        self.stats_mw()
+        self.nhst_stats()
         self.plot_average_spectrum()
+                
+        return True
     
     def plot_spectrums(self):
-        for swd_filepath_key in self.welch['spectrums'].keys():
-            [i.clear() for i in self.spectrum_plots[swd_filepath_key].values()]
-            for swd_id in self.swd_plots[swd_filepath_key].keys():
-                self.draw_swd_plot(swd_filepath_key, swd_id, x = self.welch['x'])
+        for tab_uuid in self.tabs_container:
+            for n_, swd_uuid in enumerate(self.tabs_container[tab_uuid].annotation_dict):
+                self.draw_spectrum_plot(tab_uuid, swd_uuid, col=0)
+            self.tabs_container[tab_uuid].updated = {'swd':False, 'spectrum':False}
 
-    def add_swd_tab(self, swd_array, sfreq, fn):
-        tab = MyScrollArea()
-        tab.setContextMenuPolicy(Qt.CustomContextMenu)
-        tab.customContextMenuRequested.connect(lambda x: self.tab_menu(fn, x))
+    def toggleAct(self, tab_uuid, swd_uuid):
+        self.tabs_container[tab_uuid].updated = {'swd':True, 'spectrum':True}
+        swd_uuid = self.sender().swd_uuid
+        self.toggle_single_swd(tab_uuid, swd_uuid) # check lambda
+        self.draw_spectrum_plot(tab_uuid, swd_uuid, col=0)
+        if not self.block_reanalysis:
+            self.nhst_stats()
+            self.plot_average_spectrum()
 
-        self.tabs_list.append(tab)
-        self.tabs.addTab(tab, f"{self.swd_names[fn]}")
-        
-        content_widget = QWidget()
-        layout = QGridLayout(content_widget)
 
-        self.graphics_layouts[fn] = [MyGraphicsLayoutWidget() for a in range(len(swd_array))]
-
-        self.swd_selectors[fn]=[QCheckBox(str(a)) for a in range(len(swd_array))]
-        [layout.addWidget(a) for a in self.swd_selectors[fn]]
-        [sc.setChecked(True) for sc in self.swd_selectors[fn]]
-        [a.toggled.connect(lambda:self.toggleAct(fn)) for a in self.swd_selectors[fn]]
-
-        tab.setWidgetResizable(True)
-        
-        for swd_id, swd in enumerate(swd_array):
-            layout.addWidget(self.graphics_layouts[fn][swd_id], swd_id, 1)
-            p = self.graphics_layouts[fn][swd_id].addPlot(row=0, col=0)
-            self.swd_plots[fn][swd_id] = p
-        tab.setWidget(content_widget)
-
-    def load_swd_from_csv(self, fn):
-        with open(fn, 'r') as f:
-            reader = csv.reader(f, delimiter=';')
-            rows = [r for r in reader]
-            sfreq = int(float(rows[0][0]))
-            self.welch['x'] = [float(a.replace(',', '.')) for a in rows[1][1:]]
-            spectrum_array = []
-            for row in rows[2:]:
-                names = row[0]
-                spectrum = [float(a.replace(',', '.')) for a in row[1:]]
-                spectrum_array.append(spectrum)
-            self.welch['spectrums'][fn] = np.array(spectrum_array)
-            self.welch['spectrum_id'][fn] = list(range(len(spectrum_array)))
-            self.welch['rejected_swd'][fn] = []
-
-        self.add_swd_tab(spectrum_array, sfreq, fn) #get this out of function
-        return {'sfreq':sfreq, 'data':spectrum_array}
-
-class MainWindow(pg.GraphicsWindow):
-    def __init__(self, eeg=None):
+class MainWindow(pg.GraphicsLayoutWidget):
+    def __init__(self, eeg:func.EEG=None):
         super(MainWindow, self).__init__()
         self.eeg = eeg
         self.setBackground(config.settings.value('WINDOW_COLOR'))
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
         self.create_menu()
-        self.load_eeg(self.eeg)
+        self.load_eeg_plots(self.eeg)
 
-    def load_eeg(self, eeg:dict, filter_data:bool=False):
+    def load_eeg_plots(self, eeg:func.EEG, filter_data:bool=False):
         if not eeg:
             return
         self.eeg = eeg
         if hasattr(self, 'eeg_plots'):
             self.eeg_plots.setParent(None)
             self.eeg_plots.destroy()
-        
         if filter_data:
-            eeg['data'] = func.filter_eeg(eeg['data'])
-    
-        self.eeg_plots = MainWidget(eeg = eeg['data'], parent = self)
-        self.setWindowTitle(eeg['filename'])
+           self.eeg.apply_filter()
+        
+        self.eeg_plots = MainWidget(eeg = self.eeg, parent = self)
+        self.setWindowTitle(eeg.filename)
         self.layout.addWidget(self.eeg_plots)
 
-    def save_processed_eeg(self):
+    def save_processing(self):
         if not self.eeg:
             QMessageBox.about(self, "Export SWD", "First load some EEG with annotated SWD!")
             return
-        payload = {'filename':self.eeg['filename'],
-                'annotation_dict':self.eeg['data'].annotation_dict}
-        with open (self.eeg['filename'] + '.pickle', 'wb') as f:
-            pickle.dump(payload, f)
+
+        self.create_swd_framgents_from_annotations()
+        fn = self.eeg.filename + '.pickle'
+        filepath = QFileDialog.getSaveFileName(self, caption="Save annotated raw data", directory=fn, filter='preprocessed EEG (*.pickle) ;; All files(*)')
+        if filepath[0]:
+            fn = filepath[0]
+        else:
+            return
+        swd_io.save_eeg_processing(self.eeg, fn)
+
+    def add_menu_item(self, menu, name='', func=None, shortcut='', checkable=False, checked=False, enabled=True):
+        action = QAction(name, menu, checkable=checkable, checked=checked)
+        action.setShortcut(shortcut)
+        action.triggered.connect(func)
+        action.setEnabled(enabled)
+        menu.addAction(action)
 
     def create_menu(self):
         menubar = QMenuBar(self)
 
         actionFile = menubar.addMenu("File")
-    
-        OpenRawAction = QAction("&Open raw file", self)
-        OpenRawAction.setShortcut("Ctrl+O")
-        OpenRawAction.triggered.connect(lambda x: self.open_file(ftype='raw'))
-        actionFile.addAction(OpenRawAction)
-
-        OpenAnnAction = QAction("Open &annotated file", self)
-        OpenAnnAction.setShortcut("Ctrl+Shift+O")
-        OpenAnnAction.triggered.connect(lambda x: self.open_file(ftype='pickle'))
-        actionFile.addAction(OpenAnnAction)
-
-        SaveAction = QAction("&Save intermediate file", self)
-        SaveAction.setShortcut("Ctrl+S")
-        SaveAction.triggered.connect(self.save_processed_eeg)
-        actionFile.addAction(SaveAction)
-
         actionAnalysis = menubar.addMenu("Analysis")
-        
-        DetectSwdAction = QAction("&Filter", self)
-        DetectSwdAction.triggered.connect(self.filter_and_reload)
-        actionAnalysis.addAction(DetectSwdAction)
+        actionAbout = menubar.addMenu("About")
 
-        DetectSwdAction = QAction("&Detect SWD", self)
-        DetectSwdAction.triggered.connect(self.detect_swd)
-        actionAnalysis.addAction(DetectSwdAction)
-        DetectSwdAction.setDisabled(True)
-        
-        ExportSwdAction = QAction("&Export SWD", self)
-        ExportSwdAction.triggered.connect(self.export_SWD)
-        actionAnalysis.addAction(ExportSwdAction)
-        
-        AnalyseSpectrumAction = QAction("&Spectums", self)
-        AnalyseSpectrumAction.triggered.connect(self.analyse_spectrum)
-        actionAnalysis.addAction(AnalyseSpectrumAction)
-        
-        menu7 = QAction("&Average spectrums", self)
-        menu7.triggered.connect(self.compare_avg_spectrum)
-        actionAnalysis.addAction(menu7)
-        
-        menuAbout = menubar.addMenu("About")
+        self.add_menu_item(actionFile, "&Open raw file", lambda x: self.open_file(ftype='raw'), "Ctrl+O")
+        self.add_menu_item(actionFile, "Open &annotated file", lambda x: self.open_file(ftype='pickle'), "Ctrl+Shift+O")
+        self.add_menu_item(actionFile, "&Save intermediate file", self.save_processing, "Ctrl+S")
+
+        self.add_menu_item(actionAnalysis, "&Filter", self.filter_and_reload)
+        self.add_menu_item(actionAnalysis, "&Detect SWD", self.detect_swd, enabled=False)
+        self.add_menu_item(actionAnalysis, "&Export SWD", self.export_SWD, enabled=False)
+        self.add_menu_item(actionAnalysis, "&Spectums", self.analyse_spectrum)
+        self.add_menu_item(actionAnalysis, "&Average spectrums", self.compare_avg_spectrum)
+
+
         text = f'Spectrum analyzer: version {config.__version__}\n' + \
             'https://github.com/eegdude/swd_analysis/\n' + config.acknow
-        actionAbout = QAction("&About", self)
-        actionAbout.triggered.connect(lambda:QMessageBox.about(self, "Title", text))
-        menuAbout.addAction(actionAbout)
+        
+        self.add_menu_item(actionAbout, "&About", lambda:QMessageBox.about(self, "Title", text))
         
         self.layout.addWidget(menubar)
 
@@ -617,29 +811,46 @@ class MainWindow(pg.GraphicsWindow):
             return
         self.eeg_plots.setParent(None)
         self.eeg_plots.destroy()
-        self.load_eeg(self.eeg, filter_data=True)
+        self.load_eeg_plots(self.eeg, filter_data=True)
 
     def detect_swd(self):
-        pass
-    
+        return
+        
+            
     def analyse_spectrum(self):
         self.spectral_analysis = SWDWindow(self)
-        self.spectral_analysis.runnnn()
+        self.spectral_analysis.spawn_window()
     
     def compare_avg_spectrum(self):
         self.spectral_analysis = SpectralWindow(self)
-        self.spectral_analysis.runnnn()
+        self.spectral_analysis.spawn_window()
+    
+    def create_swd_framgents_from_annotations(self):
+        self.eeg.swd_data = {}
+        self.eeg.swd_state = {}
 
+        for ch_name in self.eeg.annotation_dict:
+            self.eeg.swd_data[ch_name] = {}
+            self.eeg.swd_state[ch_name] = {}
+            
+            for swd_uuid, annotation in self.eeg.annotation_dict[ch_name].items():
+                channel = self.eeg.raw.info['ch_names'].index(ch_name)
+                fragment = self.eeg.raw[channel][0][0][int(annotation['onset']):int(annotation['onset']+ annotation['duration'])]
+                self.eeg.swd_data[ch_name][swd_uuid] = fragment
+                self.eeg.swd_state[ch_name][swd_uuid] = True
+    
     def export_SWD(self):
+        # deprecating or moving to convertor app
+        # refactor - move to standalone
         if not self.eeg:
             QMessageBox.about(self, "Export SWD", "First load some EEG with annotated SWD!")
             return
-        self.channel_selector = ExportSwdDialog(self)
+        self.channel_selector = IOSwdDialog(eeg=self.eeg, io_type='export')
         self.channel_selector.setModal(True)
         self.channel_selector.exec_()
         if self.channel_selector.ch_list:
             for ch_name in self.channel_selector.ch_list:
-                with open(self.eeg['filename'] + ch_name + '.csv', 'w') as f:
+                with open(self.eeg.raw.info['filename'] + ch_name + '.csv', 'w') as f:
                     f.write(f"{self.eeg['data'].info['sfreq']}"+ '\n')
                     for annotation in self.eeg_plots.eeg.annotation_dict[ch_name].values():
                         channel = self.eeg_plots.eeg.info['ch_names'].index(ch_name)
@@ -652,7 +863,8 @@ class MainWindow(pg.GraphicsWindow):
         eeg = func.open_data_file(filename)
         if eeg:
             self.eeg = eeg
-            self.load_eeg(self.eeg)
+            self.load_eeg_plots(self.eeg)
+
 
 class MainWidget(pg.GraphicsLayoutWidget):
     def __init__(self, eeg, parent=None):
@@ -661,8 +873,10 @@ class MainWidget(pg.GraphicsLayoutWidget):
         self.eeg = eeg
 
         if not hasattr(self.eeg, 'annotation_dict'):
-            self.eeg.annotation_dict = {a:{} for a in self.eeg.info['ch_names']}
-
+            self.eeg.annotation_dict = {a:collections.OrderedDict() for a in self.eeg.raw.info['ch_names']}
+            self.eeg.swd_uuid_dict = {a:[] for a in self.eeg.raw.info['ch_names']}
+            self.eeg.dataset_name = {a:a for a in self.eeg.raw.info['ch_names']}
+            self.eeg.dataset_uuid = {a:str(uuid.uuid4()) for a in self.eeg.raw.info['ch_names']}
         self.channel = 0
         self.eeg_plots = {}
         self.create_window_elements()
@@ -683,7 +897,7 @@ class MainWidget(pg.GraphicsLayoutWidget):
             self.create_channel_switching_buttons()
 
     def create_channel_switching_buttons(self):
-        self.channel_selectors=[QCheckBox(a) for a in self.eeg.info['ch_names']]
+        self.channel_selectors=[QCheckBox(a) for a in self.eeg.raw.info['ch_names']]
         [self.menu_layout.addWidget(a) for a in self.channel_selectors]
         [a.toggled.connect(self.switch_channels) for a in self.channel_selectors]
         
@@ -731,155 +945,11 @@ class MainWidget(pg.GraphicsLayoutWidget):
         ch_name = self.sender().text()
         if self.sender().isChecked():
             if ch_name not in self.eeg_plots.values():
-                self.create_eeg_plot(self.eeg.info['ch_names'].index(ch_name))
+                self.create_eeg_plot(self.eeg.raw.info['ch_names'].index(ch_name))
         else:
             self.eeg_plots[ch_name]['PlotWidget'].setParent(None)
             self.eeg_plots.pop(ch_name)
 
-class EegPlotter(pg.PlotCurveItem):
-    def __init__(self, eeg, channel:int=0, parent=None):
-        super(EegPlotter,self).__init__()
-        self.parent = parent
-        self.vb = self.parent.getViewBox()
-        self.vb.disableAutoRange()
-        self.range_lines = []
-
-        self.eeg = eeg
-        self.nsamp = self.eeg['data'][1].shape[0]
-        self.channel = channel
-        self.ch_name = self.eeg.info['ch_names'][self.channel]
-
-        self.last_pos = [None, None]
-        self.window_len_sec = 10
-        self.scroll_step = 1000 # make adapive?
-        self.eeg_start = 5*int(eeg.info['sfreq'])
-        self.eeg_stop = self.window_len_sec*int(eeg.info['sfreq'])
-        self.max_displayed_len = 1e4
-        self.update_plot(eeg_start=self.eeg_start, eeg_stop=self.eeg_stop, init=True)
-
-    def mouseClickEvent(self, ev):
-        self.manage_region(ev)
-    
-    def manage_region(self, ev):
-        if ev.double():
-            if len(self.range_lines) < 2:
-                self.range_lines.append(pg.InfiniteLine(int(ev.pos().x())))
-                self.vb.addItem(self.range_lines[-1])
-            
-            if len(self.range_lines) == 2:
-                self.create_region()
-   
-    def add_region(self, values, uuid):
-        region = EEGRegionItem(values=values, parent=self)
-        region.sigRegionChangeFinished.connect(lambda: self.update_annotation(region))
-        region.uuid = uuid
-        self.vb.addItem(region, ignoreBounds=True)
-        return region
-
-    def draw_region(self):
-        region = self.add_region(values = [self.range_lines[0].getXPos(),
-            self.range_lines[1].getXPos()],
-            uuid = str(uuid.uuid4()))
-
-        self.vb.removeItem(self.range_lines[0])
-        self.vb.removeItem(self.range_lines[1])
-        self.range_lines = []
-        return region
-
-    def create_region(self):
-        region = self.draw_region()
-        self.update_annotation(region)
-
-    def update_annotation(self, region):
-        self.eeg.annotation_dict[self.ch_name][region.uuid] = dict(onset = region.getRegion()[0],
-                duration = (region.getRegion()[1] - region.getRegion()[0]),
-                orig_time = self.eeg.annotations.orig_time)
-    
-    def remove_annotation(self,item):
-        self.eeg.annotation_dict[self.ch_name].pop(item.uuid, None)
-        self.vb.removeItem(item)
-
-    def update_plot(self, eeg_start=None, eeg_stop=None, caller:str=None, direction=None, init:bool=None):
-        if init:
-            y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
-            self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), yRange=(np.min(y), np.max(y)), padding=0, update=False)
-            for annotation in self.eeg.annotation_dict[self.ch_name].items():
-                self.add_region(values=[annotation[1]['onset'], annotation[1]['onset'] + annotation[1]['duration']], uuid=annotation[0])
-
-        x_range = [int(a) for a in self.vb.viewRange()[0]]
-        if caller == 'keyboard':
-            self.scroll_step = (x_range[1]-x_range[0])//4
-            if direction == 'left':
-                self.eeg_stop -= min(self.scroll_step, self.eeg_start)
-                self.eeg_start = max(self.eeg_start-self.scroll_step, 0)
-            elif direction == 'right':
-                self.eeg_start += min(self.scroll_step, abs(self.eeg_stop-self.nsamp))
-                self.eeg_stop = min(self.eeg_stop+self.scroll_step, self.nsamp)
-            elif direction == None:
-                return
-        else: # mouse
-            logging.debug (['x_range', x_range])
-
-            self.eeg_stop = min(self.nsamp, x_range[1])
-            # if x_range[0] >= 0:
-            self.eeg_start = max(x_range[0], 0)
-        
-        if [self.eeg_start, self.eeg_stop] == self.last_pos: # avoid unnecessary refreshes
-            # self.vb.disableAutoRange()
-            return
-        x = np.arange(self.eeg_start, self.eeg_stop)
-        y = self.eeg._data[self.channel, self.eeg_start: self.eeg_stop]
-        
-        if len(x) > self.max_displayed_len:
-            ds_div = int(4*len(x)//self.max_displayed_len)
-            '''
-                Downsampling from PyQtGraph 'peak' method. To do it here is somehow
-                faster then in setData. This produces most acurate graphs when zoomed out.
-            '''
-            n = len(x) // ds_div
-            x1 = np.empty((n,2))
-            x1[:] = x[:n*ds_div:ds_div,np.newaxis]
-            x = x1.reshape(n*2)
-            y1 = np.empty((n,2))
-            y2 = y[:n*ds_div].reshape((n, ds_div))
-            y1[:,0] = y2.max(axis=1)
-            y1[:,1] = y2.min(axis=1)
-            y = y1.reshape(n*2)
-        else:
-            ds_div = 1
-        
-        self.setData(x=x, y=y, pen=pg.mkPen(color=pg.intColor(0), width=1), antialias=False)#, downsample=True, downsampleMethod='peak')
-        self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
-        self.last_pos = [self.eeg_start, self.eeg_stop]
-        logging.debug (f"drawing len {len(y)} downsample {ds_div} start {self.eeg_start} stop {self.eeg_stop} range {x_range} range_samples {abs(x_range[1] - x_range[0])} eeg len {self.nsamp} last {self.last_pos}")
-
-        if len(x) > 0:
-            ax = self.parent.getPlotItem().getScale('bottom')
-            tv = ax.tickValues(x[0], x[-1], len(x))
-
-            a = sum([a[1] for a in tv], []) # smallest level ticks
-            a.sort()
-            if len(a) > 0:
-                delta_ticks_sec = (a[1] - a[0])/int(self.eeg.info['sfreq'])
-                if delta_ticks_sec > 60:
-                    level = 'm'
-                elif delta_ticks_sec < 1:
-                    level = 'ms'
-                else:
-                    level = 's'
-
-            tv = [[[v, func.timesrting_from_sample(v, self.eeg.info['sfreq'], level)] for v in tick_level[1]] for tick_level in tv]
-            ax.setTicks(tv)
-        
-        if self.eeg_stop:
-            if (self.parent.parent()):
-                mw = self.parent.parent().parent()
-                percentage = self.eeg_stop/self.nsamp*100
-                mw.setWindowTitle("{} {:.1f}%".format(mw.eeg['filename'], percentage))
-
-    def viewRangeChanged(self, *, caller:str=None):
-        self.update_plot(caller=caller)
-        self.vb.setRange(xRange=(self.eeg_start, self.eeg_stop), padding=0, update=False)
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(levelname)s	%(processName)s	%(message)s', level=logging.INFO, filename='log.log')
@@ -888,19 +958,21 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     eeg = None
 
+    path = pathlib.Path(r"test_data/sim/ampl/1/")
+    f = list(path.glob('*.pickle'))
 
+    path = pathlib.Path(r"test_data/sim/ampl/2/")
+    f1 = list(path.glob('*.pickle'))
 
-    # fn = pathlib.Path(r"C:\Data\kenul\raw\sdrnk\Эксперимент\t.csv")
-    # fn1 = pathlib.Path(r"C:\Data\kenul\raw\sdrnk\Эксперимент\t1.csv")
-    # ep = SpectralWindow(None, filenames = [fn, fn1])
+    path = pathlib.Path(r"test_data/sim/ampl/3/")
+    f2 = list(path.glob('*.pickle'))
+    
+    # filename3 = r"C:\Data\kenul\dec22\Рафаэль_результаты\Контроль\6_ month\WG_3_male_18-01-2021_14-42.bdf"
+    
+    # eeg = func.open_data_file(pathlib.Path(filename3))
+    # ep = MainWindow(eeg=eeg); ep.show()
+    # ep = SWDWindow(None, filenames=f1); ep.spawn_window()
+    ep = SpectralWindow(None, filenames=f); ep.spawn_window(); ep.add_dataset(f1);  ep.add_dataset(f2)
+    
 
-    # fn_swd1 = pathlib.Path(r'C:\Data\kenul\raw\Данные_Сидоренко\Эксперимент\Exp_20-01-2021_11-21.bdfWG_8_male_Cor-1.csv')
-    # fn_swd2 = pathlib.Path(r'C:\Data\kenul\raw\Данные_Сидоренко\Эксперимент\Exp_WG_1_male_WG_2_male_22-07-2020_10-32.bdfWG_2_male_Cor-0.csv')
-
-    # ep = SWDWindow(None, filenames = [fn_swd1, fn_swd2])
-    # ep.runnnn()
-
-    # filename = pathlib.Path(open('.test_file_path', 'r').read())
-    # eeg = func.open_data_file(filename)
-    ep = MainWindow(eeg=eeg)
     sys.exit(app.exec_())

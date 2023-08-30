@@ -131,3 +131,5 @@ dmypy.json
 test_data/
 .vscode/settings.json
 .test_file_path
+dist/
+.vscode
